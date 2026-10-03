@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, Res } from '@nestjs/common';
+import { Controller, Get, Param, Query, Res, StreamableFile } from '@nestjs/common';
 import {
   ApiOperation,
   ApiTags,
@@ -14,13 +14,14 @@ import { AuditService } from './audit.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import {
-  PaginationQuery,
-  paginationQuerySchema,
-} from '../../common/helpers/pagination';
+import { AuditListQuery, auditListQuerySchema } from './audit-list.dto';
 import {
   ExportAuditLogsQuery,
   exportAuditLogsQuerySchema,
+  ExportAuditLogsQueryDto,
+  StreamAuditLogsQuery,
+  StreamAuditLogsQueryDto,
+  streamAuditLogsQuerySchema,
 } from './audit-export.dto';
 
 /** Read-only access to the append-only audit trail. Restricted to auditors/admins. */
@@ -37,11 +38,7 @@ export class AuditController {
     description:
       'Exports audit log entries in CSV or JSON format. Supports filtering by action, date range, and agent.',
   })
-  @ApiQuery({ name: 'format', required: false, enum: ['csv', 'json'], description: 'Export format (default: json)' })
-  @ApiQuery({ name: 'startDate', required: false, type: String, description: 'ISO 8601 start date filter' })
-  @ApiQuery({ name: 'endDate', required: false, type: String, description: 'ISO 8601 end date filter' })
-  @ApiQuery({ name: 'action', required: false, type: String, description: 'Filter by audit action type' })
-  @ApiQuery({ name: 'agentId', required: false, type: String, description: 'Filter by agent UUID' })
+  @ApiQuery({ type: ExportAuditLogsQueryDto })
   @ApiProduces('text/csv', 'application/json')
   @ApiResponse({ status: 200, description: 'Audit log export (CSV or JSON)' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
@@ -72,22 +69,47 @@ export class AuditController {
     });
   }
 
+  @Get('export/stream')
+  @ApiOperation({
+    summary: 'Stream an audit log export in bounded database batches',
+    description:
+      'Streams JSON or CSV rows without buffering the complete export. Sensitive keys in oldValue and newValue are redacted.',
+  })
+  @ApiQuery({ type: StreamAuditLogsQueryDto })
+  @ApiProduces('text/csv', 'application/json')
+  @ApiResponse({ status: 200, description: 'Streamed audit log export' })
+  @ApiResponse({ status: 400, description: 'Invalid export filters' })
+  streamExport(
+    @CurrentUser('organizationId') organizationId: string,
+    @Query(new ZodValidationPipe(streamAuditLogsQuerySchema)) query: StreamAuditLogsQuery,
+  ): StreamableFile {
+    const extension = query.format === 'csv' ? 'csv' : 'json';
+    const contentType = query.format === 'csv' ? 'text/csv' : 'application/json';
+    return new StreamableFile(this.auditService.streamExport(organizationId, query), {
+      type: contentType,
+      disposition: `attachment; filename="audit-logs-${organizationId}-${Date.now()}.${extension}"`,
+    });
+  }
+
   @Get()
   @ApiOperation({
     summary: 'List audit log entries for the organization',
     description:
       'Returns a paginated list of audit log entries. Supports filtering by action, date range, and agent.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiQuery({ name: 'cursor', required: false, type: String, description: 'Opaque cursor returned by the previous page' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20, max: 100)' })
+  @ApiQuery({ name: 'actorId', required: false, type: String, description: 'Filter by actor user ID' })
   @ApiQuery({ name: 'action', required: false, type: String, description: 'Filter by audit action type' })
-  @ApiQuery({ name: 'agentId', required: false, type: String, description: 'Filter by agent UUID' })
+  @ApiQuery({ name: 'resourceId', required: false, type: String, description: 'Filter by resource identifier' })
+  @ApiQuery({ name: 'from', required: false, type: String, description: 'Inclusive ISO 8601 start time' })
+  @ApiQuery({ name: 'to', required: false, type: String, description: 'Inclusive ISO 8601 end time' })
   @ApiResponse({ status: 200, description: 'Paginated list of audit log entries' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 403, description: 'Insufficient permissions' })
   list(
     @CurrentUser('organizationId') organizationId: string,
-    @Query(new ZodValidationPipe(paginationQuerySchema)) query: PaginationQuery,
+    @Query(new ZodValidationPipe(auditListQuerySchema)) query: AuditListQuery,
   ) {
     return this.auditService.list(organizationId, query);
   }

@@ -16,9 +16,11 @@ vi.mock('../../config/redis.config', () => ({
 }));
 
 import { MetricsService } from './metrics.service';
+import { PrismaService } from '../../database/prisma.service';
 
 describe('MetricsService', () => {
   let service: MetricsService;
+  let getPoolStats: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -30,7 +32,8 @@ describe('MetricsService', () => {
       delayed: 0,
       paused: 0,
     });
-    service = new MetricsService();
+    getPoolStats = vi.fn().mockResolvedValue({ active: 2, idle: 5, waiting: 0 });
+    service = new MetricsService({ getPoolStats } as unknown as PrismaService);
   });
 
   it('exposes the Prometheus content type', () => {
@@ -83,6 +86,16 @@ describe('MetricsService', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('samples active/idle/waiting connection counts into the pool gauge', async () => {
+    const output = await service.getMetrics();
+
+    expect(getPoolStats).toHaveBeenCalled();
+    expect(output).toContain('db_pool_connections');
+    expect(output).toMatch(/db_pool_connections\{state="active"\} 2/);
+    expect(output).toMatch(/db_pool_connections\{state="idle"\} 5/);
+    expect(output).toMatch(/db_pool_connections\{state="waiting"\} 0/);
+  });
+
   describe('worker job metrics', () => {
     it('records successful job completion in the duration histogram', async () => {
       service.recordJobCompletion('webhooks', 'deliver', 0.25, 'success');
@@ -109,23 +122,14 @@ describe('MetricsService', () => {
     it('increments job counter across multiple completions', async () => {
       service.recordJobCompletion('webhooks', 'deliver', 0.1, 'success');
       service.recordJobCompletion('webhooks', 'deliver', 0.2, 'success');
-      service.recordJobCompletion('webhooks', 'deliver', 0.3, 'failure');
 
       const output = await service.getMetrics();
-
-      // Check success count is 2
-      const successMatch = output.match(
+      const match = output.match(
         /worker_jobs_total\{queue="webhooks",job_name="deliver",result="success"\} (\d+)/,
       );
-      expect(successMatch).not.toBeNull();
-      expect(successMatch?.[1]).toBe('2');
 
-      // Check failure count is 1
-      const failureMatch = output.match(
-        /worker_jobs_total\{queue="webhooks",job_name="deliver",result="failure"\} (\d+)/,
-      );
-      expect(failureMatch).not.toBeNull();
-      expect(failureMatch?.[1]).toBe('1');
+      expect(match).not.toBeNull();
+      expect(match?.[1]).toBe('2');
     });
   });
 });

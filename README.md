@@ -18,6 +18,7 @@
 - **Stellar integration** — pluggable client with a fully-featured mock (`STELLAR_USE_MOCK=true`) so the whole API runs with zero on-chain dependencies in development.
 - **AI-powered** — Nvidia NIM integration (`meta/llama-3.1-70b-instruct`) for financial briefings, anomaly detection, and assistant capabilities.
 
+
 ## Architecture
 
 ```
@@ -100,15 +101,19 @@ Full OpenAPI spec available at `/docs` when the server is running.
 
 ## Environment Variables
 
-See [`.env.example`](.env.example) for the full list. Required variables:
+All variables are validated against a single schema when the process starts;
+if any are missing or malformed, the API exits immediately with a message listing
+every problem. See [`docs/configuration.md`](docs/configuration.md) for the full
+reference (types, defaults and production rules) and
+[`.env.example`](.env.example) for a working local setup. Required variables:
 
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
-| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis/BullMQ config |
-| `JWT_ACCESS_SECRET` | JWT signing secret (≥16 chars) |
+| `JWT_ACCESS_SECRET` | Access-token signing secret (≥16 chars) |
+| `JWT_REFRESH_SECRET` | Refresh-token signing secret (≥16 chars, distinct from the access secret in production) |
 | `AI_PROVIDER_KEY` | Nvidia NIM API key (`nvapi-…`) |
-| `STELLAR_REGISTRY_CONTRACT_ID` | Deployed registry contract address |
+| `ENCRYPTION_KEY` | 32-byte encryption key (required in production; a development default is used otherwise) |
 
 ## Related Repositories
 

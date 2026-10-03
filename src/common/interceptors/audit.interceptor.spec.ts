@@ -137,10 +137,10 @@ describe('AuditInterceptor', () => {
 
   it('should handle forwarded IP from x-forwarded-for header', async () => {
     const ctx = buildMockContext();
-    const req = (ctx.switchToHttp() as ReturnType<ExecutionContext['switchToHttp']>)
-      .getRequest() as ReturnType<ExecutionContext['switchToHttp']> extends { getRequest(): infer R } ? R : never;
-    (req as unknown as { headers: Record<string, unknown> }).headers['x-forwarded-for'] =
-      '10.0.0.1, 10.0.0.2';
+    const req = (ctx.switchToHttp() as ReturnType<ExecutionContext['switchToHttp']>)[
+      'getRequest'
+    ]() as Record<string, unknown> & { headers: Record<string, string> };
+    req.headers['x-forwarded-for'] = '10.0.0.1, 10.0.0.2';
 
     const next = buildCallHandler();
     await interceptor.intercept(ctx, next).toPromise();

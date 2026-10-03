@@ -4,6 +4,7 @@ import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import {
   ApiSuccessResponse,
+  CursorPaginated,
   Paginated,
 } from '../interfaces/api-response.interface';
 import { REQUEST_ID_HEADER } from '../constants/headers';
@@ -25,6 +26,9 @@ export class ResponseInterceptor<T> implements NestInterceptor<T, ApiSuccessResp
     return next.handle().pipe(
       map((payload): ApiSuccessResponse<unknown> => {
         if (payload instanceof Paginated) {
+          return { success: true, data: payload.items, meta: payload.meta, requestId };
+        }
+        if (payload instanceof CursorPaginated) {
           return { success: true, data: payload.items, meta: payload.meta, requestId };
         }
         return { success: true, data: payload ?? null, meta: {}, requestId };

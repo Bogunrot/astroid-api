@@ -4,8 +4,9 @@ import { PrismaService } from '../../database/prisma.service';
 import { PrismaPagination } from '../../common/helpers/pagination';
 
 /**
- * Persistence for ApiKey rows. Only the SHA-256 `hashedKey` is ever stored — the
- * raw key exists solely in the create response.
+ * Persistence for ApiKey rows. Only the Argon2id `hashedKey` is ever stored — the
+ * raw key exists solely in the create response. Legacy SHA-256 hashes are supported
+ * for backward compatibility during migration.
  */
 @Injectable()
 export class ApiKeyRepository {
@@ -47,6 +48,11 @@ export class ApiKeyRepository {
   /** Resolves a presented key by its hash (used for API-key authentication). */
   findByHash(hashedKey: string): Promise<ApiKey | null> {
     return this.prisma.apiKey.findUnique({ where: { hashedKey } });
+  }
+
+  /** Resolves API keys by their prefix (used for key verification with multiple hash algorithms). */
+  findByPrefix(prefix: string): Promise<ApiKey[]> {
+    return this.prisma.apiKey.findMany({ where: { prefix } });
   }
 
   revoke(id: string): Promise<ApiKey> {

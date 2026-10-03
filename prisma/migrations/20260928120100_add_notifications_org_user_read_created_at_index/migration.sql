@@ -1,0 +1,11 @@
+-- CreateIndex
+-- Unread badge and unread filter:
+-- `WHERE "organizationId" = $1 AND "userId" = $2 AND "read" = false`
+-- (countUnread, markAllRead, list?filter=unread ordered by createdAt). With all
+-- three equality columns in the key the count is an index-only scan, and the
+-- unread page is returned pre-ordered by createdAt.
+--
+-- Built CONCURRENTLY so writes are never blocked. Postgres forbids that inside
+-- a transaction, and Prisma runs a multi-statement migration as one, so this
+-- file must contain exactly this one statement.
+CREATE INDEX CONCURRENTLY "notifications_organizationId_userId_read_createdAt_idx" ON "notifications"("organizationId", "userId", "read", "createdAt");

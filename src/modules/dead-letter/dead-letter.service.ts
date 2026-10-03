@@ -38,21 +38,23 @@ const DLQ_EVENT_NAMES = [
 ];
 
 /**
- * Dead-letter queue (DLQ) monitoring service.
+ * Dead-letter queue (DLQ) ledger service.
  *
  * Subscribes to the BullMQ `failed` event on every named queue and captures
  * terminal job failures that workers gave up on (exhausted retries or
- * `UnrecoverableError`). Each failure is:
- *   - logged with full context (job id, data, stack trace, reason, attempts),
- *   - persisted to the append-only `domain_events` DLQ ledger for audit and
- *     administrative inspection,
- *   - available for safe re-drive via {@link requeue}.
+ * `UnrecoverableError`). Each failure is persisted to the append-only
+ * `domain_events` DLQ ledger for audit and administrative inspection, and can
+ * be safely re-driven via {@link requeue} or removed via {@link purge}.
  *
  * This is a passive observer, not a worker: it opens read-only `Queue` and
  * `QueueEvents` connections (mirroring how `MetricsService` samples queue
  * depths), so it can never crash a consuming worker or change retry semantics.
- * Every handler is fault-tolerant — a logging or persistence failure is logged
- * and swallowed, never surfaced into the event loop.
+ * Every handler is fault-tolerant — a persistence failure is logged and
+ * swallowed, never surfaced into the event loop.
+ *
+ * Note: structured *logging* of job failures (including `stalled` events) is
+ * owned by `QueueFailureListener` in `@queues/queue-failure-listener`; this
+ * service owns the durable record and the operator actions.
  */
 @Injectable()
 export class DeadLetterService implements OnModuleInit, OnModuleDestroy {
@@ -94,9 +96,9 @@ export class DeadLetterService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Handles one terminal job failure: loads the full job context, logs it, and
-   * persists an immutable DLQ ledger entry. Never throws — a failure anywhere
-   * in the pipeline is logged and swallowed so the event loop stays healthy.
+   * Handles one terminal job failure: loads the full job context and persists
+   * an immutable DLQ ledger entry. Never throws — a failure anywhere in the
+   * pipeline is logged and swallowed so the event loop stays healthy.
    */
   async handleFailed(queue: string, jobId: string, failedReason?: string): Promise<void> {
     const context: JobFailureContext = {
@@ -124,8 +126,8 @@ export class DeadLetterService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`DLQ could not load job ${queue}/${jobId}; the job record may have been cleaned up`);
       }
 
-      this.logFailure(context);
-
+      // Structured logging of the failure itself is owned by
+      // `QueueFailureListener`; this service only owns the durable record.
       const organizationId = this.extractOrganizationId(context.data);
       await this.persistLedgerEntry({ organizationId, context });
     } catch (error) {
@@ -224,22 +226,6 @@ export class DeadLetterService implements OnModuleInit, OnModuleDestroy {
     const handle = this.queueHandles.get(queue);
     if (!handle) return null;
     return handle.getJob(jobId);
-  }
-
-  private logFailure(context: JobFailureContext): void {
-    // One structured warning captures the full terminal-failure context so an
-    // operator can diagnose without digging into Redis raw keys.
-    this.logger.warn({
-      msg: `Dead-letter job captured`,
-      queue: context.queue,
-      jobId: context.jobId,
-      name: context.name,
-      attemptsMade: context.attemptsMade,
-      failedReason: context.failedReason,
-      stacktrace: context.stacktrace,
-      data: context.data,
-      failedAt: context.failedAt.toISOString(),
-    }, `DLQ captured ${context.queue}/${context.jobId} after ${context.attemptsMade} attempts`);
   }
 
   /** Writes the terminal failure to the append-only domain event ledger. */

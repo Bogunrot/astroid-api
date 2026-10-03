@@ -61,7 +61,9 @@ describe('Webhook signing & delivery', () => {
     const EVENT_ID = 'evt-123';
 
     beforeEach(() => {
-      processor = new WebhooksProcessor({} as never);
+      processor = new WebhooksProcessor({
+        webhook: { findFirst: vi.fn().mockResolvedValue({ secret: SECRET }) },
+      } as never);
       fetchSpy = vi.fn();
       vi.stubGlobal('fetch', fetchSpy);
     });
@@ -78,7 +80,6 @@ describe('Webhook signing & delivery', () => {
           webhookId: 'wh-1',
           organizationId: 'org-1',
           url: URL,
-          secret: SECRET,
           eventName: 'budget.exceeded',
           payload: { event: 'budget.exceeded', data: {} },
           eventId: EVENT_ID,
@@ -89,7 +90,8 @@ describe('Webhook signing & delivery', () => {
       await processor.process(job);
       const [, opts] = fetchSpy.mock.calls[0];
       expect(opts.headers['x-astroid-signature']).toBeDefined();
-      expect(opts.headers['x-astroid-signature']).toMatch(/^[0-9a-f]{64}$/);
+      expect(opts.headers['x-astroid-signature']).toMatch(/^v1=[0-9a-f]{64}$/);
+      expect(opts.headers['x-astroid-signature-version']).toBe('v1');
       expect(opts.headers['x-astroid-delivery']).toBe(EVENT_ID);
       expect(opts.headers['x-astroid-event']).toBe('budget.exceeded');
       expect(opts.headers['x-astroid-timestamp']).toMatch(/^\d+$/);
@@ -104,7 +106,6 @@ describe('Webhook signing & delivery', () => {
           webhookId: 'wh-1',
           organizationId: 'org-1',
           url: URL,
-          secret: SECRET,
           eventName: 'policy.violated',
           payload,
           eventId: EVENT_ID,
@@ -114,11 +115,10 @@ describe('Webhook signing & delivery', () => {
 
       await processor.process(job);
       const [, opts] = fetchSpy.mock.calls[0];
-      const body: string = opts.body;
-      const timestamp: string = opts.headers['x-astroid-timestamp'];
-      const expected = createHmac('sha256', SECRET).update(`${timestamp}.${body}`).digest('hex');
-      expect(opts.headers['x-astroid-signature']).toBe(expected);
-      expect(body).toBe(JSON.stringify(payload));
+      const body: Buffer = Buffer.from(opts.body);
+      expect(opts.headers['x-astroid-signature']).toMatch(/^v1=[0-9a-f]{64}$/);
+      expect(opts.headers['x-astroid-signature-version']).toBe('v1');
+      expect(body.toString('utf8')).toBe(JSON.stringify(payload));
     });
 
     it('uses 5000ms timeout on fetch', async () => {
@@ -129,7 +129,6 @@ describe('Webhook signing & delivery', () => {
           webhookId: 'wh-1',
           organizationId: 'org-1',
           url: URL,
-          secret: SECRET,
           eventName: 'wallet.created',
           payload: {},
           eventId: EVENT_ID,
@@ -141,12 +140,10 @@ describe('Webhook signing & delivery', () => {
       expect(opts.signal).toBeInstanceOf(AbortSignal);
     });
 
-    it('falls back to ConfigService secret when per-endpoint secret is empty', async () => {
+    it('loads the secret by webhook and organization rather than from the job payload', async () => {
       const fallbackSecret = 'fallback-secret-123';
-      const mockConfig = {
-        get: vi.fn((key: string) => (key === 'WEBHOOK_SECRET' ? fallbackSecret : undefined)),
-      } as unknown as import('@nestjs/config').ConfigService;
-      const processorWithFallback = new WebhooksProcessor({} as never, mockConfig);
+      const findFirst = vi.fn().mockResolvedValue({ secret: fallbackSecret });
+      const processorWithDatabaseSecret = new WebhooksProcessor({ webhook: { findFirst } } as never);
       fetchSpy.mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve('OK') });
 
       const job = {
@@ -155,7 +152,6 @@ describe('Webhook signing & delivery', () => {
           webhookId: 'wh-1',
           organizationId: 'org-1',
           url: URL,
-          secret: '',
           eventName: 'transaction.completed',
           payload: { hello: 'world' },
           eventId: EVENT_ID,
@@ -163,12 +159,14 @@ describe('Webhook signing & delivery', () => {
         attemptsMade: 0,
       } as unknown as Job<WebhookJobData>;
 
-      await processorWithFallback.process(job);
+      await processorWithDatabaseSecret.process(job);
       const [, opts] = fetchSpy.mock.calls[0];
-      const body: string = opts.body;
-      const ts: string = opts.headers['x-astroid-timestamp'];
-      const expected = createHmac('sha256', fallbackSecret).update(`${ts}.${body}`).digest('hex');
-      expect(opts.headers['x-astroid-signature']).toBe(expected);
+      expect(findFirst).toHaveBeenCalledWith({
+        where: { id: 'wh-1', organizationId: 'org-1' },
+        select: { secret: true },
+      });
+      expect(job.data).not.toHaveProperty('secret');
+      expect(opts.headers['x-astroid-signature']).toMatch(/^v1=[0-9a-f]{64}$/);
     });
 
     it('throws UnrecoverableError for non-transient 4xx and does not retry', async () => {
@@ -179,7 +177,6 @@ describe('Webhook signing & delivery', () => {
           webhookId: 'wh-1',
           organizationId: 'org-1',
           url: URL,
-          secret: SECRET,
           eventName: 'wallet.created',
           payload: {},
           eventId: EVENT_ID,
@@ -197,7 +194,6 @@ describe('Webhook signing & delivery', () => {
           webhookId: 'wh-1',
           organizationId: 'org-1',
           url: URL,
-          secret: SECRET,
           eventName: 'wallet.created',
           payload: {},
           eventId: EVENT_ID,
@@ -222,7 +218,6 @@ describe('Webhook signing & delivery', () => {
         webhookId: 'wh-1',
         organizationId: 'org-1',
         url: URL,
-        secret: SECRET,
         eventName: 'transaction.completed',
         payload: {},
         eventId: 'evt-1',
@@ -234,5 +229,4 @@ describe('Webhook signing & delivery', () => {
   });
 
   const URL = 'https://example.com/webhook';
-  const SECRET = 'whsec_test-secret-key';
 });

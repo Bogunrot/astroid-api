@@ -1,5 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
 import { Prisma } from '@prisma/client';
+import { Queue } from 'bullmq';
 import { AuditRepository, CreateAuditLogData } from './audit.repository';
 import { AuditHashService } from './audit-hash.service';
 import {
@@ -8,6 +10,7 @@ import {
   toPrismaPagination,
 } from '../../common/helpers/pagination';
 import { Paginated } from '../../common/interfaces/api-response.interface';
+import { Queues, AuditLogJobEntry } from '../../queues/queues.constants';
 
 const SORTABLE = ['createdAt', 'action', 'entity'];
 
@@ -20,13 +23,73 @@ type ExportedAuditLog = Prisma.AuditLogGetPayload<{
  * Writes and queries the immutable audit trail. Records Who / When / Where /
  * Why / Old / New for every important action. Never updates or deletes.
  * Integrates cryptographic hash chaining for tamper-evident audit history.
+ *
+ * High-frequency events may instead be persisted asynchronously via
+ * {@link queueRecord}, which enqueues entries onto the BullMQ `audit` queue;
+ * the `AuditWorker` (src/workers/audit.worker.ts) batch-writes them without
+ * blocking the request-response cycle.
  */
 @Injectable()
 export class AuditService {
+  private readonly logger = new Logger(AuditService.name);
+
   constructor(
     private readonly repository: AuditRepository,
     private readonly hashService: AuditHashService,
+    @Optional()
+    @InjectQueue(Queues.Audit)
+    private readonly auditQueue?: Queue<import('../../queues/queues.constants').AuditJobData>,
   ) {}
+
+  /**
+   * Persists audit entries asynchronously through the BullMQ `audit` queue.
+   * Entries are grouped by organization (one job per organization) so the
+   * worker can batch-insert and hash-chain them efficiently. Enqueue failures
+   * are logged and never propagate — the audit trail must not break callers.
+   *
+   * @returns the number of jobs enqueued (one per organization represented).
+   */
+  async queueRecord(entries: AuditLogJobEntry[]): Promise<number> {
+    if (entries.length === 0) return 0;
+    if (!this.auditQueue) {
+      this.logger.warn('Audit queue unavailable — falling back to synchronous persistence');
+      for (const entry of entries) {
+        await this.record(entry as CreateAuditLogData);
+      }
+      return 0;
+    }
+
+    const byOrganization = new Map<string, AuditLogJobEntry[]>();
+    for (const entry of entries) {
+      const bucket = byOrganization.get(entry.organizationId);
+      if (bucket) {
+        bucket.push(entry);
+      } else {
+        byOrganization.set(entry.organizationId, [entry]);
+      }
+    }
+
+    let enqueued = 0;
+    for (const [organizationId, orgEntries] of byOrganization) {
+      try {
+        await this.auditQueue.add(
+          'audit-persist',
+          { entries: orgEntries },
+          { attempts: 5, backoff: { type: 'exponential', delay: 1_000 } },
+        );
+        enqueued += 1;
+      } catch (error) {
+        this.logger.error(
+          `Failed to enqueue ${orgEntries.length} audit entr(ies) for organization ${organizationId}: ` +
+            `${(error as Error).message} — persisting synchronously instead`,
+        );
+        for (const entry of orgEntries) {
+          await this.record(entry as CreateAuditLogData);
+        }
+      }
+    }
+    return enqueued;
+  }
 
   async record(data: CreateAuditLogData) {
     const previousHash = await this.hashService.getLatestHash(data.organizationId);

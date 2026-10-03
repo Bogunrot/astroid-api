@@ -372,6 +372,100 @@ Delete a budget.
 
 ---
 
+## Request Correlation
+
+Every response includes the selected request ID in the `x-request-id` header and the standard response envelope. A caller-supplied ID is accepted only when it is 1-128 ASCII characters, starts with a letter or digit, and otherwise contains only letters, digits, `.`, `_`, `:`, or `-`. Invalid values are replaced with a server-generated UUID. The selected ID is propagated as typed event/job metadata and is isolated per concurrent request.
+
+## Audit History (`/audit`)
+
+### GET `/audit`
+List audit records in reverse chronological order using a stable `(createdAt, id)` keyset.
+
+**Query Parameters:** `limit` defaults to 20 and is bounded to 1-100; `cursor` is the opaque `nextCursor` from the previous response; optional `actorId`, `action`, `resourceId`, `from`, and `to` filters apply within the authenticated organization. `from` and `to` are inclusive ISO 8601 timestamps and `from` must not be later than `to`.
+
+The response `meta` includes `limit`, `hasNext`, and `nextCursor` (null on the final page). New records inserted after a page is read do not shift subsequent pages.
+
+**Example:** `GET /audit?limit=20&actorId=user-123&action=wallet.created`
+
+## Outbound Webhook Signatures
+
+Webhook creation and secret rotation responses disclose the signing secret once. Later list, get, update, delivery, and audit responses never include it. Store the secret securely and rotate it when compromised.
+
+Every delivery includes `x-astroid-signature`, `x-astroid-signature-version`, `x-astroid-timestamp`, and `x-astroid-event-id`. `x-astroid-delivery` remains an alias for the event ID. The signature header is `v1=<lowercase hex HMAC-SHA256>` and the version header is `v1`.
+
+The canonical signed bytes are UTF-8 `v1.<timestamp>.<event-id>.` followed by the exact raw HTTP body bytes. Each retry uses the same event ID and body, with a fresh timestamp and signature. Consumers should also reject timestamps outside their chosen replay window.
+
+```js
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+export function verifyAstroidWebhook({ secret, headers, rawBody }) {
+  const version = headers['x-astroid-signature-version'];
+  const timestamp = headers['x-astroid-timestamp'];
+  const eventId = headers['x-astroid-event-id'];
+  const received = headers['x-astroid-signature'];
+  if (version !== 'v1' || !/^\d{1,12}$/.test(timestamp) || !eventId) return false;
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false;
+
+  const prefix = Buffer.from(`v1.${timestamp}.${eventId}.`, 'utf8');
+  const expected = createHmac('sha256', secret)
+    .update(Buffer.concat([prefix, rawBody]))
+    .digest();
+  const match = /^v1=([0-9a-f]{64})$/.exec(received);
+  if (!match) return false;
+  const actual = Buffer.from(match[1], 'hex');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+```
+
+## Health Probes (`/health`)
+
+The liveness and readiness probes are served **outside** the API prefix, so
+orchestrator and load-balancer probe paths do not change with the API version.
+Both are public, exempt from rate limiting, excluded from the audit trail, and
+return raw JSON (no success envelope).
+
+### GET `/health/live`
+Liveness probe. Returns `200` whenever the process is running. It performs no
+dependency checks, so a database or cache outage never causes an otherwise
+healthy process to be restarted.
+
+**Authentication:** Public
+
+**Response (200):**
+```json
+{ "status": "up", "timestamp": "2026-09-28T10:00:00.000Z", "uptimeSeconds": 42 }
+```
+
+### GET `/health/ready`
+Readiness probe. Probes the database (`SELECT 1`) and cache (Redis `PING`) in
+parallel, each bounded by a 2 second timeout. Returns `200` when every
+dependency is up and `503` when any is down.
+
+**Authentication:** Public
+
+**Response (503 example):**
+```json
+{
+  "status": "down",
+  "timestamp": "2026-09-28T10:00:00.000Z",
+  "services": {
+    "database": {
+      "status": "down",
+      "latencyMs": 2001,
+      "timestamp": "2026-09-28T10:00:00.000Z",
+      "error": "Database health check timed out after 2000ms"
+    },
+    "cache": { "status": "up", "latencyMs": 1, "timestamp": "2026-09-28T10:00:00.000Z" }
+  }
+}
+```
+
+Richer diagnostics (including Stellar and migration status) remain available
+under the API prefix at `GET /{API_PREFIX}/health/readiness`,
+`GET /{API_PREFIX}/health/liveness` and `GET /{API_PREFIX}/health/database`.
+
+---
+
 ## Common Types
 
 ### Pagination Query
@@ -381,14 +475,32 @@ Delete a budget.
 | limit | number | 10 | Items per page |
 
 ### Error Response
-All endpoints return errors in a consistent format:
+All endpoints return errors as [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details with `Content-Type: application/problem+json`:
 ```json
 {
-  "statusCode": number,
-  "message": string,
-  "error": string
+  "type": "urn:astroid:problem:validation-error",
+  "title": "Validation Failed",
+  "status": 400,
+  "detail": "Request validation failed",
+  "instance": "/api/v1/agents",
+  "code": "VALIDATION_ERROR",
+  "requestId": "req_018f...",
+  "details": [{ "path": "limit", "message": "Number must be less than or equal to 200" }]
 }
 ```
+
+| Member | Description |
+|--------|-------------|
+| `type` | URI identifying the problem type (`urn:astroid:problem:<code>`), or `about:blank` for plain HTTP errors without a dedicated code (e.g. 405) |
+| `title` | Short summary of the problem type; the same for every occurrence |
+| `status` | HTTP status code |
+| `detail` | Explanation specific to this occurrence |
+| `instance` | Request path that produced the error (query string omitted) |
+| `code` | Machine-readable error code; clients should switch on this rather than on `title` or `detail` |
+| `requestId` | Correlation id, matching the `x-request-id` header |
+| `details` | Optional structured context, e.g. field-level validation errors |
+
+Unhandled server errors always return `500` with `code: "INTERNAL_ERROR"` and a generic `detail`; internal information is only written to the server logs under the `requestId`.
 
 ### Authentication
 Most endpoints require Bearer token authentication in the format:
@@ -397,3 +509,16 @@ Authorization: Bearer <access_token>
 ```
 
 Tokens are obtained via `/auth/login` or `/auth/register` endpoints.
+
+### Public Endpoint Rate Limiting
+Unauthenticated endpoints (routes marked `@Public()`, such as `/auth/login`, `/auth/register` and `/auth/refresh`, and every route under `/public/`) share a per-IP sliding-window budget: 60 requests per 60 seconds by default, configurable with `PUBLIC_RATE_LIMIT_MAX_REQUESTS` and `PUBLIC_RATE_LIMIT_WINDOW_SECONDS`. Counters are stored in Redis, so the budget applies across all API instances.
+
+Every rate-limited response includes:
+
+| Header | Description |
+|--------|-------------|
+| `X-RateLimit-Limit` | Requests allowed per window |
+| `X-RateLimit-Remaining` | Requests left in the current window |
+| `X-RateLimit-Reset` | Unix time (seconds) at which the next request slot frees up |
+
+When the budget is exhausted the API responds with `429 Too Many Requests`, a `Retry-After` header (seconds) and error code `RATE_LIMITED`. These limits are in addition to the per-route auth throttling on the `/auth` endpoints.

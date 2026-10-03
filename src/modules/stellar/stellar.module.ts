@@ -52,6 +52,11 @@ import { StellarController } from './stellar.controller';
     StellarService,
     StellarTransactionService,
   ],
-  exports: [StellarService, StellarTransactionService, HorizonCircuitBreakerService],
+  exports: [
+    SOROBAN_CLIENT,
+    StellarService,
+    StellarTransactionService,
+    HorizonCircuitBreakerService,
+  ],
 })
 export class StellarModule {}

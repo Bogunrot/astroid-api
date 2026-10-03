@@ -9,21 +9,22 @@ import {
   toPrismaPagination,
 } from '../../common/helpers/pagination';
 import { Paginated } from '../../common/interfaces/api-response.interface';
-import { generateApiKey, sha256 } from '../../utils/crypto.util';
+import { generateApiKey, verifyArgon2, sha256 } from '../../utils/crypto.util';
 
 const SORTABLE = ['createdAt', 'name', 'lastUsedAt'];
 
 /**
  * Issues and manages programmatic API keys. The raw secret is generated, shown
- * to the caller exactly once, and only its SHA-256 hash is persisted. Keys can
- * never be recovered — only regenerated.
+ * to the caller exactly once, and only its Argon2id hash is persisted. Keys can
+ * never be recovered — only regenerated. Legacy SHA-256 hashes are supported for
+ * backward compatibility during migration.
  */
 @Injectable()
 export class ApiKeyService {
   constructor(private readonly repository: ApiKeyRepository) {}
 
   async create(organizationId: string, actorId: string, input: CreateApiKeyInput) {
-    const { raw, prefix, hashedKey } = generateApiKey('live');
+    const { raw, prefix, hashedKey } = await generateApiKey('live');
     const expiresAt = input.expiresInDays
       ? new Date(Date.now() + input.expiresInDays * 86_400_000)
       : null;
@@ -73,25 +74,51 @@ export class ApiKeyService {
   }
 
   /**
-   * Verifies a presented raw key: matches by hash, checks it is neither revoked
-   * nor expired, and updates lastUsedAt. Returns the owning key or null.
+   * Verifies a presented raw key: matches by Argon2 hash (with SHA-256 fallback for legacy keys),
+   * checks it is neither revoked nor expired, and updates lastUsedAt. Returns the owning key or null.
    */
   async verify(rawKey: string) {
     if (!rawKey || typeof rawKey !== 'string' || rawKey.trim().length === 0) {
       return null;
     }
-    const key = await this.repository.findByHash(sha256(rawKey.trim()));
-    if (!key || key.revokedAt) {
-      return null;
+    
+    const trimmedKey = rawKey.trim();
+    
+    // First try to find by the stored hash (we need to retrieve the key to verify)
+    // Since we can't hash the input without knowing which algorithm was used,
+    // we'll try to find by prefix first, then verify the hash
+    const keys = await this.repository.findByPrefix(trimmedKey.slice(0, 14));
+    
+    for (const key of keys) {
+      if (key.revokedAt) {
+        continue;
+      }
+      if (key.expiresAt && key.expiresAt.getTime() < Date.now()) {
+        continue;
+      }
+      
+      // Try Argon2 verification first (new keys)
+      const isValidArgon2 = await verifyArgon2(key.hashedKey, trimmedKey);
+      if (isValidArgon2) {
+        try {
+          await this.repository.touchLastUsed(key.id);
+        } catch {
+          // Gracefully continue even if updating lastUsedAt encounters an error
+        }
+        return key;
+      }
+      
+      // Fallback to SHA-256 for legacy keys (backward compatibility)
+      if (key.hashedKey === sha256(trimmedKey)) {
+        try {
+          await this.repository.touchLastUsed(key.id);
+        } catch {
+          // Gracefully continue even if updating lastUsedAt encounters an error
+        }
+        return key;
+      }
     }
-    if (key.expiresAt && key.expiresAt.getTime() < Date.now()) {
-      return null;
-    }
-    try {
-      await this.repository.touchLastUsed(key.id);
-    } catch {
-      // Gracefully continue even if updating lastUsedAt encounters an error
-    }
-    return key;
+    
+    return null;
   }
 }

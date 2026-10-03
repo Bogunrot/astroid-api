@@ -18,7 +18,6 @@ describe('WebhookDeliveryService', () => {
     webhookId: 'webhook-1',
     organizationId: 'org-1',
     url: 'https://example.com/webhook',
-    secret: 'secret-key',
     eventName: 'transaction.created',
     payload: { id: 'txn-1' },
     eventId: 'event-1',
@@ -31,7 +30,14 @@ describe('WebhookDeliveryService', () => {
 
     expect(mockQueue.add).toHaveBeenCalledWith(
       'webhook-delivery',
-      jobData,
+      expect.objectContaining({
+        ...jobData,
+        metadata: {
+          requestId: expect.any(String),
+          correlationId: expect.any(String),
+          traceId: expect.any(String),
+        },
+      }),
       {
         attempts: 5,
         backoff: {
@@ -50,7 +56,7 @@ describe('WebhookDeliveryService', () => {
 
     expect(mockQueue.add).toHaveBeenCalledWith(
       'webhook-delivery',
-      jobData,
+      expect.objectContaining({ ...jobData, metadata: expect.objectContaining({ requestId: expect.any(String) }) }),
       expect.any(Object),
     );
   });
@@ -61,7 +67,7 @@ describe('WebhookDeliveryService', () => {
 
     expect(mockQueue.add).toHaveBeenCalledWith(
       'webhook-delivery',
-      jobData,
+      expect.objectContaining({ ...jobData, metadata: expect.objectContaining({ requestId: expect.any(String) }) }),
       expect.any(Object),
     );
   });
@@ -73,7 +79,7 @@ describe('WebhookDeliveryService', () => {
 
     expect(mockQueue.add).toHaveBeenCalledWith(
       'webhook-delivery',
-      jobData,
+      expect.objectContaining({ ...jobData, metadata: expect.objectContaining({ requestId: expect.any(String) }) }),
       expect.any(Object),
     );
   });

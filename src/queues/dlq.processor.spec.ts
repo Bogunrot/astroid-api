@@ -3,6 +3,10 @@ import { Job, Queue } from 'bullmq';
 import { DlqProcessor } from './dlq.processor';
 import { DlqJobData, Queues } from './queues.constants';
 
+vi.mock('../utils/retry.util', () => ({
+  retryWithBackoff: vi.fn((fn: () => Promise<unknown>) => fn()),
+}));
+
 describe('DlqProcessor', () => {
   let processor: DlqProcessor;
   let mockPrisma: Record<string, unknown>;
@@ -53,10 +57,44 @@ describe('DlqProcessor', () => {
             originalQueue: Queues.Webhooks,
             originalJobName: 'deliver-webhook',
             failedReason: 'HTTP 500: Internal Server Error',
+            stacktrace: ['Error: HTTP 500 at fetch'],
+            payload: { webhookId: 'wh-1', event: 'payment.completed' },
             attemptsMade: 5,
             failedAt: '2026-08-30T21:00:00.000Z',
           },
         },
+      });
+    });
+
+    it('persists the stack trace and original payload in the audit event for forensic inspection', async () => {
+      const mockJobData: DlqJobData = {
+        originalQueue: Queues.Transactions,
+        originalJobId: 'tx-789',
+        originalJobName: 'execute-transaction',
+        payload: { transactionId: 'tx-789', amount: '100' },
+        failedReason: 'Horizon timeout',
+        stacktrace: ['Error: Horizon timeout', '    at submit (worker.ts:42:11)'],
+        attemptsMade: 3,
+        failedAt: '2026-08-30T21:10:00.000Z',
+      };
+
+      const mockJob = {
+        id: 'dlq-job-3',
+        data: mockJobData,
+      } as unknown as Job<DlqJobData>;
+
+      await processor.process(mockJob);
+
+      expect(mockDomainEventCreate).toHaveBeenCalledTimes(1);
+      const event = mockDomainEventCreate.mock.calls[0][0] as {
+        data: { payload: Record<string, unknown> };
+      };
+      expect(event.data.payload).toMatchObject({
+        originalQueue: Queues.Transactions,
+        failedReason: 'Horizon timeout',
+        stacktrace: ['Error: Horizon timeout', '    at submit (worker.ts:42:11)'],
+        payload: { transactionId: 'tx-789', amount: '100' },
+        attemptsMade: 3,
       });
     });
 
@@ -78,6 +116,80 @@ describe('DlqProcessor', () => {
 
       const result = await processorNoDb.process(mockJob);
       expect(result.handled).toBe(true);
+    });
+
+    it('retries the audit write on a transient database error', async () => {
+      const { retryWithBackoff } = await import('../utils/retry.util');
+      (retryWithBackoff as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (fn: () => Promise<unknown>, opts: { maxAttempts?: number }) => {
+          // Simulate two failures then success on the third attempt.
+          let attempts = 0;
+          while (attempts < (opts.maxAttempts ?? 3) - 1) {
+            attempts++;
+            try { await fn(); } catch { /* keep retrying */ }
+          }
+          return fn();
+        },
+      );
+
+      const flaky = vi.fn()
+        .mockRejectedValueOnce(new Error('connection reset'))
+        .mockRejectedValueOnce(new Error('connection reset'))
+        .mockResolvedValue({ id: 'event-2' });
+      mockPrisma = { domainEvent: { create: flaky } };
+      processor = new DlqProcessor(mockPrisma as never);
+
+      const mockJob = {
+        id: 'dlq-job-retry',
+        data: {
+          originalQueue: Queues.Webhooks,
+          originalJobId: 'job-retry',
+          payload: {},
+          failedReason: 'transient',
+          attemptsMade: 1,
+          failedAt: new Date().toISOString(),
+        },
+      } as unknown as Job<DlqJobData>;
+
+      const result = await processor.process(mockJob);
+      expect(result.handled).toBe(true);
+    });
+
+    it('stops retrying and logs an error on a non-retryable constraint violation', async () => {
+      const { retryWithBackoff } = await import('../utils/retry.util');
+      (retryWithBackoff as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (_fn: () => Promise<unknown>, opts: { isRetryable?: (e: unknown) => boolean }) => {
+          const err = new Error('NOT NULL constraint failed: domainEvent.aggregateId');
+          if (opts.isRetryable && !opts.isRetryable(err)) throw err;
+          throw err;
+        },
+      );
+
+      const nonRetryableCreate = vi.fn().mockRejectedValue(
+        new Error('NOT NULL constraint failed: domainEvent.aggregateId'),
+      );
+      mockPrisma = { domainEvent: { create: nonRetryableCreate } };
+      processor = new DlqProcessor(mockPrisma as never);
+
+      const errorSpy = vi.spyOn(processor['logger'], 'error').mockImplementation(() => undefined);
+
+      const mockJob = {
+        id: 'dlq-job-constraint',
+        data: {
+          originalQueue: Queues.Transactions,
+          originalJobId: 'tx-constraint',
+          payload: {},
+          failedReason: 'constraint',
+          attemptsMade: 1,
+          failedAt: new Date().toISOString(),
+        },
+      } as unknown as Job<DlqJobData>;
+
+      const result = await processor.process(mockJob);
+      expect(result.handled).toBe(true);
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to record DLQ audit event after retries'),
+      );
     });
   });
 

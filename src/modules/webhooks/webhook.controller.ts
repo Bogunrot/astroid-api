@@ -32,10 +32,12 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { AuditAction } from '../../common/decorators/audit-action.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { PaginationQuery, paginationQuerySchema } from '../../common/helpers/pagination';
+import { ThrottleTierDecorator } from '../../common/decorators/throttle-tier.decorator';
 
 @ApiTags('webhooks')
 @ApiBearerAuth('access-token')
 @Controller('webhooks')
+@ThrottleTierDecorator('webhook')
 export class WebhookController {
   constructor(private readonly webhookService: WebhookService) {}
 

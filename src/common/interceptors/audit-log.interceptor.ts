@@ -5,18 +5,19 @@ import {
   Logger,
   NestInterceptor,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
+import { createHash } from 'crypto';
 import { Request, Response } from 'express';
 import { Observable } from 'rxjs';
 
-import { AuditService } from '../../modules/audit/audit.service';
 import { CreateAuditLogData } from '../../modules/audit/audit.repository';
+import { AuditService } from '../../modules/audit/audit.service';
 import { getClientIp } from '../../utils/ip.util';
+import { AUDIT_LOG_KEY, AuditLogOptions } from '../decorators/audit-log.decorator';
+import { IS_SKIP_AUDIT_KEY } from '../decorators/skip-audit.decorator';
 import { AuthenticatedUser } from '../interfaces/authenticated-user.interface';
-
-/** HTTP methods whose state-mutating requests are audited. Read-only traffic is skipped. */
-const AUDITED_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /** Value substituted for sensitive fields before an audit payload is persisted. */
 export const REDACTED_VALUE = '[REDACTED]';
@@ -36,6 +37,8 @@ const SENSITIVE_KEY_FRAGMENTS = [
   'apikey',
   'privatekey',
   'authorization',
+  'mnemonic',
+  'seedphrase',
 ];
 
 /** Returns true when a field name denotes sensitive data (e.g. `apiKey`, `accessToken`). */
@@ -71,21 +74,54 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Global audit interceptor. Persists a permanent, traceable record of every
- * state-mutating request (POST/PUT/PATCH/DELETE) into the existing PostgreSQL
- * audit trail through `AuditService`/Prisma.
+ * Stable SHA-256 fingerprint of a (already sanitized) request payload.
+ *
+ * The digest lets an operator prove which payload an action carried without
+ * duplicating it in the audit trail, and makes tampering detectable: a changed
+ * body always yields a different hash.
+ */
+export function hashPayload(value: unknown): string {
+  let serialized: string;
+  if (value === undefined) {
+    serialized = '';
+  } else {
+    try {
+      serialized = JSON.stringify(value) ?? '';
+    } catch {
+      // Circular or otherwise non-serializable bodies still get a fingerprint.
+      serialized = String(value);
+    }
+  }
+  return createHash('sha256').update(serialized).digest('hex');
+}
+
+/** Resolved identity of the principal that triggered the request. */
+interface AuditIdentity {
+  organizationId: string;
+  userId: string | null;
+  agentId?: string;
+  ipAddress?: string;
+}
+
+/**
+ * Structured audit interceptor for sensitive agent operations.
+ *
+ * Persists a permanent, traceable record for every route (handler or the whole
+ * controller) decorated with `@AuditLog()`. Undecorated routes — including
+ * read-only queries — are passed straight through without touching the database,
+ * which is what makes the logging selective and high-performance.
  *
  * Captured per request:
- *   - authenticated user (or agent) identity
+ *   - the actor: human admin user id, or the acting agent id
  *   - HTTP method, route path and client IP
- *   - the request body with sensitive fields masked
- *   - the final response status code
+ *   - the payload fingerprint (SHA-256 of the sanitized body)
+ *   - the sanitized body itself, with secrets/keys/tokens redacted
+ *   - the final response status code and the handler duration in milliseconds
  *
- * The audit write happens once the response has been fully sent (`finish`), so
- * the recorded status code is the real one — including error statuses set by
- * the global exception filter. Persistence is fire-and-forget and failures are
- * logged but never crash the client request (no strict compliance mode exists
- * in this project, so non-blocking is the required behavior).
+ * The write happens once the response has been fully sent (`finish`), so the
+ * recorded status code is the real one — including error statuses set by the
+ * global exception filter. Persistence is fire-and-forget: a failure is logged
+ * but never breaks the client request.
  */
 @Injectable()
 export class AuditLogInterceptor implements NestInterceptor {
@@ -94,17 +130,24 @@ export class AuditLogInterceptor implements NestInterceptor {
   constructor(
     private readonly auditService: AuditService,
     private readonly config: ConfigService,
+    private readonly reflector: Reflector,
   ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    const options = this.reflector.getAllAndOverride<AuditLogOptions | undefined>(AUDIT_LOG_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+
+    // Selective logging: only routes decorated with @AuditLog() are persisted,
+    // and an explicit @SkipAudit() always wins.
+    if (!options || this.isSkipped(context)) {
+      return next.handle();
+    }
+
     const http = context.switchToHttp();
     const request = http.getRequest<Request & { user?: AuthenticatedUser }>();
     const response = http.getResponse<Response>();
-
-    // Only state-mutating methods are audited; read-only traffic is skipped.
-    if (!AUDITED_METHODS.has(request.method)) {
-      return next.handle();
-    }
 
     // Audit rows are scoped to an organization (required FK on AuditLog).
     const organizationId =
@@ -113,56 +156,98 @@ export class AuditLogInterceptor implements NestInterceptor {
       (request.headers['x-organization-id'] as string) ||
       undefined;
     if (!organizationId) {
+      this.logger.debug(
+        `Skipping @AuditLog() route without an organization context: ${request.path}`,
+      );
       return next.handle();
     }
 
-    const userId = request.user?.id || (request.headers['x-user-id'] as string) || null;
-    // Same agent-identity resolution chain as AgentTraceInterceptor.
-    const agentId =
-      (request.params?.agentId as string) ||
-      (request.body?.agentId as string) ||
-      (request.query?.agentId as string) ||
-      (request.headers['x-agent-id'] as string) ||
-      undefined;
+    const identity: AuditIdentity = {
+      organizationId,
+      userId: request.user?.id || (request.headers['x-user-id'] as string) || null,
+      // Same agent-identity resolution chain as AgentTraceInterceptor.
+      agentId:
+        (request.params?.agentId as string) ||
+        (request.body?.agentId as string) ||
+        (request.query?.agentId as string) ||
+        (request.headers['x-agent-id'] as string) ||
+        undefined,
+      ipAddress: this.resolveIp(request),
+    };
 
-    const trustProxy = this.config.get<boolean>('app.trustProxy', false);
-    const ipAddress =
-      getClientIp(request.ip ?? '', request.headers['x-forwarded-for'] as string, trustProxy) ||
-      undefined;
+    // Captured before the handler runs so the recorded duration covers the full
+    // execution time of the route.
+    const startedAt = Date.now();
 
     response.on('finish', () => {
       void this.persistAudit(
-        this.buildAuditData(request, context, { organizationId, userId, agentId, ipAddress }, response.statusCode),
+        this.buildAuditData(
+          request,
+          context,
+          identity,
+          options,
+          response.statusCode,
+          Date.now() - startedAt,
+        ),
       );
     });
 
     return next.handle();
   }
 
-  /** Builds the audit row, storing the masked body, path and agent id as `newValue`. */
+  /** True when the route opted out with `@SkipAudit()`. */
+  private isSkipped(context: ExecutionContext): boolean {
+    return (
+      this.reflector.getAllAndOverride<boolean>(IS_SKIP_AUDIT_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) === true
+    );
+  }
+
+  /** Resolves the client IP, honouring `x-forwarded-for` only when proxies are trusted. */
+  private resolveIp(request: Request): string | undefined {
+    const trustProxy = this.config.get<boolean>('app.trustProxy', false);
+    const forwarded = request.headers['x-forwarded-for'] as string | undefined;
+    return getClientIp(request.ip ?? '', forwarded, trustProxy) || undefined;
+  }
+
+  /** Builds the audit row, storing the masked body, path and actor as `newValue`. */
   private buildAuditData(
     request: Request & { user?: AuthenticatedUser },
     context: ExecutionContext,
-    identity: { organizationId: string; userId: string | null; agentId?: string; ipAddress?: string },
+    identity: AuditIdentity,
+    options: AuditLogOptions,
     statusCode: number,
+    durationMs: number,
   ): CreateAuditLogData {
     const body = request.body;
     const maskedBody = body && typeof body === 'object' ? maskSensitiveData(body) : undefined;
+    const actor = identity.userId
+      ? { type: 'USER' as const, id: identity.userId }
+      : identity.agentId
+        ? { type: 'AGENT' as const, id: identity.agentId }
+        : null;
 
     const newValue: Prisma.InputJsonValue = {
       path: request.path,
       ...(maskedBody !== undefined ? { body: maskedBody } : {}),
+      // A stable fingerprint of the sanitized payload: proves what was sent
+      // without persisting the same secrets twice.
+      payloadHash: hashPayload(maskedBody),
       // Agent identity is stored here per the existing audit-export convention
       // (the schema has no dedicated agent column).
       ...(identity.agentId ? { agentId: identity.agentId } : {}),
+      ...(actor ? { actor } : {}),
       statusCode,
+      durationMs,
     };
 
     return {
       organizationId: identity.organizationId,
       userId: identity.userId,
-      action: request.method,
-      entity: this.resolveEntity(context),
+      action: options.action ?? request.method,
+      entity: options.entity ?? this.resolveEntity(context),
       entityId: (request.params?.id as string) ?? null,
       newValue,
       ipAddress: identity.ipAddress,

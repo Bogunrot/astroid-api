@@ -1,11 +1,15 @@
 import { EventEmitter } from 'events';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { ExecutionContext, Logger } from '@nestjs/common';
-import { of } from 'rxjs';
+import { Reflector } from '@nestjs/core';
+import { Observable, of } from 'rxjs';
 
 import { AuditService } from '../../modules/audit/audit.service';
+import { AUDIT_LOG_KEY, AuditLogOptions } from '../decorators/audit-log.decorator';
+import { IS_SKIP_AUDIT_KEY } from '../decorators/skip-audit.decorator';
 import {
   AuditLogInterceptor,
+  hashPayload,
   isSensitiveKey,
   maskSensitiveData,
   REDACTED_VALUE,
@@ -42,14 +46,43 @@ function createContext(
       getRequest: () => request,
       getResponse: () => response,
     }),
+    getHandler: () => undefined,
     getClass: () => controller,
   } as unknown as ExecutionContext;
+}
+
+/** Reflector stub that only answers the two metadata keys the interceptor reads. */
+function makeReflector(stub: { audit?: AuditLogOptions; skip?: boolean } = { audit: {} }): Reflector {
+  return {
+    getAllAndOverride: vi.fn((key: string) => {
+      if (key === AUDIT_LOG_KEY) return stub.audit;
+      if (key === IS_SKIP_AUDIT_KEY) return stub.skip;
+      return undefined;
+    }),
+  } as unknown as Reflector;
+}
+
+interface InterceptorOptions {
+  audit?: AuditLogOptions;
+  skip?: boolean;
+  trustProxy?: boolean;
+}
+
+function makeInterceptor(
+  record: ReturnType<typeof vi.fn>,
+  options: InterceptorOptions = {},
+): AuditLogInterceptor {
+  const audit = Object.prototype.hasOwnProperty.call(options, 'audit') ? options.audit : {};
+  const { skip = false, trustProxy = false } = options;
+  const auditService = { record } as unknown as AuditService;
+  const config = { get: vi.fn().mockReturnValue(trustProxy) } as never;
+  return new AuditLogInterceptor(auditService, config, makeReflector({ audit, skip }));
 }
 
 /** Subscribes so the handler runs, emits `finish`, then waits for the async audit write. */
 async function runRequest(
   interceptor: AuditLogInterceptor,
-  context: ReturnType<typeof createContext>,
+  context: ExecutionContext,
   response: EventEmitter & { statusCode: number },
 ): Promise<void> {
   const observable = interceptor.intercept(context, {
@@ -63,10 +96,20 @@ async function runRequest(
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
-function makeInterceptor(record: ReturnType<typeof vi.fn>, trustProxy = false): AuditLogInterceptor {
-  const auditService = { record } as unknown as AuditService;
-  const config = { get: vi.fn().mockReturnValue(trustProxy) } as never;
-  return new AuditLogInterceptor(auditService, config);
+const OWNER = { id: 'user-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN' };
+
+function baseRequest(overrides: Partial<MockRequest> = {}): MockRequest {
+  return {
+    method: 'PATCH',
+    path: '/api/v1/policies/pol-123',
+    headers: { 'user-agent': 'test-agent' },
+    params: { id: 'pol-123' },
+    query: {},
+    body: { name: 'Daily limit' },
+    ip: '127.0.0.1',
+    user: OWNER,
+    ...overrides,
+  };
 }
 
 describe('AuditLogInterceptor', () => {
@@ -74,21 +117,17 @@ describe('AuditLogInterceptor', () => {
     vi.restoreAllMocks();
   });
 
-  describe('payload extraction', () => {
-    it('captures user id, method, path, client IP, body and response status code', async () => {
+  describe('decorated endpoints', () => {
+    it('persists actor, method, path, IP, masked body, payload hash and status code', async () => {
       const record = vi.fn().mockResolvedValue(undefined);
-      const interceptor = makeInterceptor(record, true);
+      const interceptor = makeInterceptor(record, { trustProxy: true });
 
-      const request: MockRequest = {
-        method: 'PATCH',
-        path: '/api/v1/policies/pol-123',
+      const request = baseRequest({
         headers: { 'user-agent': 'test-agent', 'x-forwarded-for': '203.0.113.5' },
         params: { id: 'pol-123' },
-        query: {},
         body: { name: 'Daily limit', configuration: { maxAmount: 100 } },
         ip: '::1',
-        user: { id: 'user-1', organizationId: 'org-1', email: 'admin@example.com', role: 'ADMIN' },
-      };
+      });
       const response = createMockResponse(201);
       const context = createContext(request, response);
 
@@ -104,29 +143,65 @@ describe('AuditLogInterceptor', () => {
           entityId: 'pol-123',
           ipAddress: '203.0.113.5',
           device: 'test-agent',
-          newValue: {
+          newValue: expect.objectContaining({
             path: '/api/v1/policies/pol-123',
             body: { name: 'Daily limit', configuration: { maxAmount: 100 } },
+            payloadHash: hashPayload({ name: 'Daily limit', configuration: { maxAmount: 100 } }),
+            actor: { type: 'USER', id: 'user-1' },
             statusCode: 201,
-          },
+            durationMs: expect.any(Number),
+          }),
         }),
       );
     });
 
-    it('captures agent identity and defaults to the socket IP when no proxy header is trusted', async () => {
+    it('uses the @AuditLog() metadata for the semantic action and entity', async () => {
       const record = vi.fn().mockResolvedValue(undefined);
-      const interceptor = makeInterceptor(record, false);
+      const interceptor = makeInterceptor(record, {
+        audit: { action: 'POLICY_OVERRIDDEN', entity: 'SpendingPolicy' },
+      });
 
-      const request: MockRequest = {
+      const request = baseRequest();
+      const response = createMockResponse(200);
+      const context = createContext(request, response);
+
+      await runRequest(interceptor, context, response);
+
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'POLICY_OVERRIDDEN', entity: 'SpendingPolicy' }),
+      );
+    });
+
+    it('audits a decorated read-only GET, which is not logged by default', async () => {
+      const record = vi.fn().mockResolvedValue(undefined);
+      const interceptor = makeInterceptor(record);
+
+      const request = baseRequest({ method: 'GET', path: '/api/v1/policies/pol-123' });
+      const response = createMockResponse(200);
+      const context = createContext(request, response);
+
+      await runRequest(interceptor, context, response);
+
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record).toHaveBeenCalledWith(expect.objectContaining({ action: 'GET' }));
+    });
+
+    it('records the acting agent as the actor when no human user is present', async () => {
+      const record = vi.fn().mockResolvedValue(undefined);
+      const interceptor = makeInterceptor(record);
+
+      const request = baseRequest({
         method: 'POST',
         path: '/api/v1/wallets/wal-1/rotate',
-        headers: { 'user-agent': 'AgentRunner/1.0', 'x-agent-id': 'agent-9' },
+        headers: {
+          'user-agent': 'AgentRunner/1.0',
+          'x-agent-id': 'agent-9',
+          'x-organization-id': 'org-1',
+        },
         params: { id: 'wal-1' },
-        query: {},
-        body: { agentId: 'agent-9', newLabel: 'ops' },
-        ip: '10.0.0.7',
-        user: { id: 'user-2', organizationId: 'org-2', email: 'a@b.com', role: 'DEVELOPER' },
-      };
+        body: { newLabel: 'ops' },
+        user: undefined,
+      });
       const response = createMockResponse(200);
       const context = createContext(request, response, WalletController);
 
@@ -134,18 +209,95 @@ describe('AuditLogInterceptor', () => {
 
       expect(record).toHaveBeenCalledWith(
         expect.objectContaining({
-          userId: 'user-2',
+          userId: null,
           action: 'POST',
           entity: 'Wallet',
-          ipAddress: '10.0.0.7',
-          newValue: expect.objectContaining({ agentId: 'agent-9', statusCode: 200 }),
+          newValue: expect.objectContaining({
+            agentId: 'agent-9',
+            actor: { type: 'AGENT', id: 'agent-9' },
+          }),
         }),
       );
     });
+
+    it('records the handler execution duration alongside the response status', async () => {
+      const record = vi.fn().mockResolvedValue(undefined);
+      const interceptor = makeInterceptor(record);
+
+      const request = baseRequest({ method: 'POST', path: '/api/v1/policies', body: {} });
+      const response = createMockResponse(201);
+      const context = createContext(request, response);
+
+      const observable = interceptor.intercept(context, {
+        handle: () =>
+          new Observable((subscriber) => {
+            const timer = setTimeout(() => {
+              subscriber.next({ success: true });
+              subscriber.complete();
+            }, 25);
+            return () => clearTimeout(timer);
+          }),
+      });
+      await new Promise<void>((resolve, reject) => {
+        observable.subscribe({ next: () => resolve(), error: reject });
+      });
+      response.emit('finish');
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      const { newValue } = record.mock.calls[0][0];
+      expect(newValue.durationMs).toBeGreaterThanOrEqual(20);
+      expect(newValue.statusCode).toBe(201);
+    });
   });
 
-  describe('sensitive data masking', () => {
-    it('redacts sensitive fields, preserves non-sensitive ones and does not mutate the original body', async () => {
+  describe('scope filtering', () => {
+    it('never audits an undecorated route, even a state-mutating one', async () => {
+      const record = vi.fn().mockResolvedValue(undefined);
+      const interceptor = makeInterceptor(record, { audit: undefined });
+
+      const request = baseRequest({ method: 'DELETE' });
+      const response = createMockResponse(204);
+      const context = createContext(request, response);
+
+      await runRequest(interceptor, context, response);
+
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('honours @SkipAudit() even when the route is decorated', async () => {
+      const record = vi.fn().mockResolvedValue(undefined);
+      const interceptor = makeInterceptor(record, { skip: true });
+
+      const request = baseRequest({ method: 'DELETE' });
+      const response = createMockResponse(204);
+      const context = createContext(request, response);
+
+      await runRequest(interceptor, context, response);
+
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('skips decorated routes with no organization context (e.g. public routes)', async () => {
+      const record = vi.fn().mockResolvedValue(undefined);
+      const interceptor = makeInterceptor(record);
+
+      const request = baseRequest({
+        method: 'POST',
+        path: '/api/v1/auth/login',
+        body: { email: 'a@b.com', password: 'secret' },
+        user: undefined,
+      });
+      const response = createMockResponse(200);
+      const context = createContext(request, response);
+
+      await runRequest(interceptor, context, response);
+
+      expect(record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('sensitive data sanitization', () => {
+    it('redacts secrets, preserves safe fields and never mutates the original body', async () => {
       const record = vi.fn().mockResolvedValue(undefined);
       const interceptor = makeInterceptor(record);
 
@@ -155,19 +307,11 @@ describe('AuditLogInterceptor', () => {
         apiKey: 'abc123',
         token: 'jwt-token',
         passkey: 'cred-1',
+        privateKey: 'SDFJKL-seed',
         webhook: { signature: 'sig-here', url: 'https://example.com/hook' },
         nested: { refreshToken: 'rt-1', note: 'keep me' },
       };
-      const request: MockRequest = {
-        method: 'PUT',
-        path: '/api/v1/developer/keys',
-        headers: { 'user-agent': 'test' },
-        params: {},
-        query: {},
-        body: originalBody,
-        ip: '127.0.0.1',
-        user: { id: 'user-1', organizationId: 'org-1', email: 'a@b.com', role: 'ADMIN' },
-      };
+      const request = baseRequest({ method: 'PUT', body: originalBody });
       const response = createMockResponse(200);
       const context = createContext(request, response);
 
@@ -180,34 +324,13 @@ describe('AuditLogInterceptor', () => {
         apiKey: REDACTED_VALUE,
         token: REDACTED_VALUE,
         passkey: REDACTED_VALUE,
+        privateKey: REDACTED_VALUE,
         webhook: { signature: REDACTED_VALUE, url: 'https://example.com/hook' },
         nested: { refreshToken: REDACTED_VALUE, note: 'keep me' },
       });
       // The original request body must be untouched.
-      expect(originalBody).toEqual({
-        username: 'john',
-        password: 'secret-pass',
-        apiKey: 'abc123',
-        token: 'jwt-token',
-        passkey: 'cred-1',
-        webhook: { signature: 'sig-here', url: 'https://example.com/hook' },
-        nested: { refreshToken: 'rt-1', note: 'keep me' },
-      });
-    });
-
-    it('masks sensitive keys case-insensitively and across separators', () => {
-      expect(isSensitiveKey('password')).toBe(true);
-      expect(isSensitiveKey('PasswordHash')).toBe(true);
-      expect(isSensitiveKey('apiKey')).toBe(true);
-      expect(isSensitiveKey('api_key')).toBe(true);
-      expect(isSensitiveKey('x-api-key')).toBe(true);
-      expect(isSensitiveKey('accessToken')).toBe(true);
-      expect(isSensitiveKey('passkey')).toBe(true);
-      expect(isSensitiveKey('signature')).toBe(true);
-      expect(isSensitiveKey('privateKey')).toBe(true);
-      expect(isSensitiveKey('username')).toBe(false);
-      expect(isSensitiveKey('name')).toBe(false);
-      expect(isSensitiveKey('amount')).toBe(false);
+      expect(originalBody.password).toBe('secret-pass');
+      expect(originalBody.apiKey).toBe('abc123');
     });
 
     it('masks sensitive entries inside arrays', () => {
@@ -220,26 +343,56 @@ describe('AuditLogInterceptor', () => {
         { label: 'backup', apiKey: REDACTED_VALUE },
       ]);
     });
+
+    it('detects sensitive keys case-insensitively and across separators', () => {
+      expect(isSensitiveKey('password')).toBe(true);
+      expect(isSensitiveKey('PasswordHash')).toBe(true);
+      expect(isSensitiveKey('apiKey')).toBe(true);
+      expect(isSensitiveKey('api_key')).toBe(true);
+      expect(isSensitiveKey('x-api-key')).toBe(true);
+      expect(isSensitiveKey('accessToken')).toBe(true);
+      expect(isSensitiveKey('privateKey')).toBe(true);
+      expect(isSensitiveKey('username')).toBe(false);
+      expect(isSensitiveKey('amount')).toBe(false);
+    });
+  });
+
+  describe('payload hashing', () => {
+    it('is deterministic for identical payloads', () => {
+      expect(hashPayload({ a: 1, b: 'two' })).toBe(hashPayload({ a: 1, b: 'two' }));
+    });
+
+    it('changes when the payload changes', () => {
+      expect(hashPayload({ amount: 10 })).not.toBe(hashPayload({ amount: 11 }));
+    });
+
+    it('hashes an absent body without throwing', () => {
+      expect(hashPayload(undefined)).toHaveLength(64);
+    });
+
+    it('records the hash of the sanitized body, not the raw secret', async () => {
+      const record = vi.fn().mockResolvedValue(undefined);
+      const interceptor = makeInterceptor(record);
+
+      const request = baseRequest({ method: 'POST', body: { apiKey: 'super-secret' } });
+      const response = createMockResponse(201);
+      const context = createContext(request, response);
+
+      await runRequest(interceptor, context, response);
+
+      const { newValue } = record.mock.calls[0][0];
+      expect(newValue.payloadHash).toBe(hashPayload({ apiKey: REDACTED_VALUE }));
+      expect(JSON.stringify(newValue)).not.toContain('super-secret');
+    });
   });
 
   describe('audit failure handling', () => {
     it('does not crash the request when audit persistence fails and logs the error', async () => {
-      const loggerError = vi
-        .spyOn(Logger.prototype, 'error')
-        .mockImplementation(() => undefined);
+      const loggerError = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
       const record = vi.fn().mockRejectedValue(new Error('database unreachable'));
       const interceptor = makeInterceptor(record);
 
-      const request: MockRequest = {
-        method: 'DELETE',
-        path: '/api/v1/policies/pol-1',
-        headers: { 'user-agent': 'test' },
-        params: { id: 'pol-1' },
-        query: {},
-        body: {},
-        ip: '127.0.0.1',
-        user: { id: 'user-1', organizationId: 'org-1', email: 'a@b.com', role: 'ADMIN' },
-      };
+      const request = baseRequest({ method: 'DELETE', path: '/api/v1/policies/pol-1' });
       const response = createMockResponse(204);
       const context = createContext(request, response);
 
@@ -250,51 +403,6 @@ describe('AuditLogInterceptor', () => {
       expect(loggerError).toHaveBeenCalledWith(
         expect.stringContaining('Failed to write audit log for DELETE Policy'),
       );
-    });
-  });
-
-  describe('scope filtering', () => {
-    it('does not audit read-only GET requests', async () => {
-      const record = vi.fn().mockResolvedValue(undefined);
-      const interceptor = makeInterceptor(record);
-
-      const request: MockRequest = {
-        method: 'GET',
-        path: '/api/v1/policies',
-        headers: { 'user-agent': 'test' },
-        params: {},
-        query: {},
-        body: {},
-        ip: '127.0.0.1',
-        user: { id: 'user-1', organizationId: 'org-1', email: 'a@b.com', role: 'ADMIN' },
-      };
-      const response = createMockResponse(200);
-      const context = createContext(request, response);
-
-      await runRequest(interceptor, context, response);
-
-      expect(record).not.toHaveBeenCalled();
-    });
-
-    it('skips requests without an organization context (e.g. public routes)', async () => {
-      const record = vi.fn().mockResolvedValue(undefined);
-      const interceptor = makeInterceptor(record);
-
-      const request: MockRequest = {
-        method: 'POST',
-        path: '/api/v1/auth/login',
-        headers: { 'user-agent': 'test' },
-        params: {},
-        query: {},
-        body: { email: 'a@b.com', password: 'secret' },
-        ip: '127.0.0.1',
-      };
-      const response = createMockResponse(200);
-      const context = createContext(request, response);
-
-      await runRequest(interceptor, context, response);
-
-      expect(record).not.toHaveBeenCalled();
     });
   });
 });

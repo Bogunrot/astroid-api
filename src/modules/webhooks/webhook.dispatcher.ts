@@ -3,6 +3,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { WebhookRepository } from './webhook.repository';
 import { WebhookDeliveryService } from './services/webhook-delivery.service';
 import { DomainEventEnvelope } from '../../events/domain-event.types';
+import { DOMAIN_EVENT_ENVELOPE } from '../../events/domain-event.types';
 import { WEBHOOK_EVENTS } from '../../events/event-names';
 
 /**
@@ -21,7 +22,7 @@ export class WebhookDispatcher {
     private readonly deliveryService: WebhookDeliveryService,
   ) {}
 
-  @OnEvent('**')
+  @OnEvent(DOMAIN_EVENT_ENVELOPE)
   async dispatch(envelope: DomainEventEnvelope): Promise<void> {
     if (!envelope?.organizationId) {
       return;
@@ -54,15 +55,12 @@ export class WebhookDispatcher {
             webhookId: webhook.id,
             organizationId: envelope.organizationId || '',
             url: webhook.url,
-            secret: webhook.secret,
             eventName: envelope.name,
             payload,
-            eventId: `${envelope.aggregateType}-${envelope.aggregateId}-${envelope.occurredAt.getTime()}`,
+            eventId: envelope.eventId ?? `${envelope.name}-${envelope.aggregateType}-${envelope.aggregateId ?? 'unknown'}-${envelope.occurredAt.getTime()}`,
           });
-        } catch (error) {
-          this.logger.error(
-            `Failed to queue webhook ${webhook.id} for '${envelope.name}': ${(error as Error).message}`,
-          );
+        } catch {
+          this.logger.error(`Failed to queue webhook ${webhook.id} for '${envelope.name}'`);
         }
       }),
     );

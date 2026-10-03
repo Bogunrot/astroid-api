@@ -3,6 +3,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Job, Queue } from 'bullmq';
 import { Queues, DlqJobData } from './queues.constants';
 import { PrismaService } from '../database/prisma.service';
+import { retryWithBackoff } from '../utils/retry.util';
 
 /**
  * BullMQ worker processor for the Dead-Letter Queue (DLQ).
@@ -31,6 +32,7 @@ export class DlqProcessor extends WorkerHost {
       originalJobName,
       payload,
       failedReason,
+      stacktrace,
       attemptsMade,
       failedAt,
     } = job.data;
@@ -40,7 +42,7 @@ export class DlqProcessor extends WorkerHost {
     );
 
     this.logger.debug(
-      `[DLQ-JOB-DETAILS] Payload: ${JSON.stringify(payload)} | FailedAt: ${failedAt}`,
+      `[DLQ-JOB-DETAILS] Payload: ${JSON.stringify(payload)} | Stacktrace: ${JSON.stringify(stacktrace ?? [])} | FailedAt: ${failedAt}`,
     );
 
     await this.recordDeadLetterAudit(job.data);
@@ -92,6 +94,8 @@ export class DlqProcessor extends WorkerHost {
 
   /**
    * Records a domain event or audit log for dead-lettered jobs if database is available.
+   * Retries up to three times on transient errors; stops immediately on constraint
+   * violations that would not succeed on a retry.
    */
   private async recordDeadLetterAudit(data: DlqJobData): Promise<void> {
     if (!this.prisma) return;
@@ -104,23 +108,35 @@ export class DlqProcessor extends WorkerHost {
         | undefined;
 
       if (domainEvents?.create) {
-        await domainEvents.create({
-          data: {
-            name: 'job.dead_lettered',
-            aggregateType: 'DEAD_LETTER_QUEUE',
-            aggregateId: data.originalJobId ?? null,
-            payload: {
-              originalQueue: data.originalQueue,
-              originalJobName: data.originalJobName,
-              failedReason: data.failedReason,
-              attemptsMade: data.attemptsMade,
-              failedAt: data.failedAt,
-            },
+        await retryWithBackoff(
+          () =>
+            domainEvents.create!({
+              data: {
+                name: 'job.dead_lettered',
+                aggregateType: 'DEAD_LETTER_QUEUE',
+                aggregateId: data.originalJobId ?? null,
+                payload: {
+                  originalQueue: data.originalQueue,
+                  originalJobName: data.originalJobName,
+                  failedReason: data.failedReason,
+                  stacktrace: data.stacktrace ?? [],
+                  payload: data.payload,
+                  attemptsMade: data.attemptsMade,
+                  failedAt: data.failedAt,
+                },
+              },
+            }),
+          {
+            maxAttempts: 3,
+            baseDelayMs: 200,
+            operationName: 'DLQ audit event',
+            isRetryable: (err: unknown) =>
+              !(err instanceof Error && err.message.includes('NOT NULL')),
           },
-        });
+        );
       }
     } catch (err) {
-      this.logger.warn(`Failed to record DLQ audit event: ${(err as Error).message}`);
+      this.logger.error(`Failed to record DLQ audit event after retries: ${(err as Error).message}`);
     }
   }
 }

@@ -3,11 +3,14 @@ import { UserRole } from '@prisma/client';
 /** The authenticated principal attached to each request by JWT or API key strategies. */
 export interface AuthenticatedUser {
   id: string;
+  sub?: string;
   organizationId: string;
   email?: string;
   role: UserRole;
+  tier?: string;
   sessionId?: string;
   apiKeyId?: string;
+  createdById?: string | null;
   scopes?: string[];
   permissions?: string[];
   isApiKey?: boolean;
@@ -17,6 +20,7 @@ export interface AuthenticatedUser {
 export interface AuthenticatedApiKey {
   id: string;
   keyId: string;
+  apiKeyId?: string;
   organizationId: string;
   createdById?: string | null;
   name: string;

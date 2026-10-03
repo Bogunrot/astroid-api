@@ -23,6 +23,7 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuditAction } from '../../common/decorators/audit-action.decorator';
+import { AuditLog } from '../../common/decorators/audit-log.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { AuthenticatedUser } from '../../common/interfaces/authenticated-user.interface';
 import {
@@ -61,6 +62,7 @@ export class PolicyController {
   @Post()
   @Roles(UserRole.OWNER, UserRole.ADMIN, UserRole.FINANCE)
   @AuditAction('POLICY_CREATED')
+  @AuditLog({ action: 'POLICY_CREATED', entity: 'Policy' })
   @ApiOperation({
     summary: 'Create a policy',
     description:
@@ -114,6 +116,7 @@ export class PolicyController {
   @Patch(':id')
   @Roles(UserRole.OWNER, UserRole.ADMIN, UserRole.FINANCE)
   @AuditAction('POLICY_UPDATED')
+  @AuditLog({ action: 'POLICY_UPDATED', entity: 'Policy' })
   @ApiOperation({
     summary: 'Update a policy',
     description:
@@ -137,6 +140,7 @@ export class PolicyController {
   @Delete(':id')
   @Roles(UserRole.OWNER, UserRole.ADMIN)
   @AuditAction('POLICY_DELETED')
+  @AuditLog({ action: 'POLICY_DELETED', entity: 'Policy' })
   @ApiOperation({
     summary: 'Delete (soft) a policy',
     description:

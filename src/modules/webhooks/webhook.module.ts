@@ -1,16 +1,21 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { WebhookController } from './webhook.controller';
+import { WebhookIngressController } from './webhook-ingress.controller';
+import { WebhookIngressService } from './webhook-ingress.service';
 import { WebhookService } from './webhook.service';
 import { WebhookRepository } from './webhook.repository';
 import { WebhookDispatcher } from './webhook.dispatcher';
 import { WebhookDeliveryService } from './services/webhook-delivery.service';
-import { WebhookWorker } from './workers/webhook.worker';
+import { WebhookCircuitBreakerService } from './services/webhook-circuit-breaker.service';
 import { WebhooksProcessor } from './webhooks.processor';
 import { Queues } from '../../queues/queues.constants';
 import { redisConfig } from '../../config/redis.config';
 import { webhookBackoffStrategy } from '../../utils/backoff.util';
 import { MetricsModule } from '../metrics/metrics.module';
+import { RawBodyMiddleware } from '../../common/middleware/raw-body.middleware';
+import { WebhookSignatureGuard } from '../../common/guards/webhook-signature.guard';
+import { SlidingWindowThrottlerGuard } from '../../common/guards/sliding-window-throttler.guard';
 import type { RegisterQueueOptions } from '@nestjs/bullmq';
 
 /**
@@ -51,15 +56,24 @@ import type { RegisterQueueOptions } from '@nestjs/bullmq';
     }),
     MetricsModule,
   ],
-  controllers: [WebhookController],
+  controllers: [WebhookController, WebhookIngressController],
   providers: [
     WebhookService,
     WebhookRepository,
     WebhookDispatcher,
     WebhookDeliveryService,
-    WebhookWorker,
+    WebhookCircuitBreakerService,
     WebhooksProcessor,
+    WebhookIngressService,
+    WebhookSignatureGuard,
+    SlidingWindowThrottlerGuard,
   ],
-  exports: [WebhookService],
+  exports: [WebhookService, WebhookCircuitBreakerService],
 })
-export class WebhookModule {}
+export class WebhookModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer
+      .apply(RawBodyMiddleware)
+      .forRoutes({ path: 'webhooks/receive', method: RequestMethod.POST });
+  }
+}

@@ -1,9 +1,21 @@
-import { INestApplication, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  INestApplication,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaClient } from '@prisma/client';
 import { DatabaseConfig } from '../config/database.config';
 import { buildDatasourceUrl } from './datasource-url';
+import { createQueryMetricsExtension } from './query-metrics.extension';
 import { createQueryTimeoutExtension } from './query-timeout.extension';
+import {
+  checkMigrationStatus,
+  getDefaultMigrationsDir,
+  MigrationCheckResult,
+} from './migration-checker';
 
 /**
  * The single Prisma client for the application. Manages connection lifecycle
@@ -25,6 +37,8 @@ import { createQueryTimeoutExtension } from './query-timeout.extension';
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
+  private readonly connectionRetryAttempts: number;
+  private readonly connectionRetryDelayMs: number;
 
   /**
    * Dedicated client for background workers. It uses its own (smaller) pool
@@ -52,20 +66,21 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         { level: 'error', emit: 'event' },
       ],
     });
+    this.connectionRetryAttempts = database.connectionRetryAttempts;
+    this.connectionRetryDelayMs = database.connectionRetryDelayMs;
 
-    // Inject the timeout-guard extension into this (API) client. `$extends`
-    // returns a new client; copying its delegates onto `this` keeps the
-    // PrismaService identity every repository already depends on. The cast is
-    // required because the generated `$extends` return type is a dynamic
-    // extension type rather than a full `PrismaClient`.
+    // Inject the metrics + timeout-guard extensions into this (API) client.
+    // `$extends` returns a new client; copying its delegates onto `this` keeps
+    // the PrismaService identity every repository already depends on.
     Object.assign(
       this,
-      this.$extends(
-        createQueryTimeoutExtension({
-          queryTimeoutMs: database.queryTimeoutMs,
-          poolTimeoutMs: database.poolTimeoutMs,
-        }),
-      ) as unknown as PrismaClient,
+      this.$extends(createQueryMetricsExtension({ slowQueryThresholdMs: database.slowQueryThresholdMs }))
+          .$extends(
+            createQueryTimeoutExtension({
+              queryTimeoutMs: database.queryTimeoutMs,
+              poolTimeoutMs: database.poolTimeoutMs,
+            }),
+          ) as unknown as PrismaClient,
     );
 
     // Dedicated worker pool: smaller, extended timeout, no statement_timeout.
@@ -74,40 +89,124 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       poolTimeoutMs: database.poolTimeoutMs,
       statementTimeoutMs: 0,
     });
-    // Same cast rationale as above: the generated `$extends` return type is a
-    // dynamic extension type, not a full `PrismaClient`.
     this.workerClient = new PrismaClient({
       datasources: { db: { url: workerUrl } },
       log: [
         { level: 'warn', emit: 'event' },
         { level: 'error', emit: 'event' },
       ],
-    }).$extends(
-      createQueryTimeoutExtension({
-        queryTimeoutMs: database.workerQueryTimeoutMs,
-        poolTimeoutMs: database.poolTimeoutMs,
-      }),
-    ) as unknown as PrismaClient;
+    })
+      .$extends(createQueryMetricsExtension({ slowQueryThresholdMs: database.slowQueryThresholdMs }))
+      .$extends(
+        createQueryTimeoutExtension({
+          queryTimeoutMs: database.workerQueryTimeoutMs,
+          poolTimeoutMs: database.poolTimeoutMs,
+        }),
+      ) as unknown as PrismaClient;
   }
 
   async onModuleInit(): Promise<void> {
-    try {
-      await this.$connect();
-      await this.workerClient.$connect();
-      this.logger.log('Prisma connected to the database');
-    } catch (error) {
-      // Do not crash on boot when the DB is unavailable (e.g. typecheck/build,
-      // or during local development before `docker compose up`). Log and go on.
-      this.logger.warn(
-        `Prisma could not connect on startup: ${(error as Error).message}. ` +
-          'The API will retry lazily on first query.',
-      );
+    await this.connectWithRetry('API', () => this.$connect());
+    await this.connectWithRetry('worker', () => this.workerClient.$connect());
+    await this.validateMigrations();
+    this.logger.log('Prisma connected to the database and migrations are up to date');
+  }
+
+  private async connectWithRetry(pool: string, connect: () => Promise<void>): Promise<void> {
+    for (let attempt = 1; attempt <= this.connectionRetryAttempts; attempt += 1) {
+      try {
+        await connect();
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (attempt === this.connectionRetryAttempts) {
+          this.logger.error(
+            `Prisma ${pool} database connection failed after ${attempt} attempt(s): ${message}`,
+          );
+          throw error;
+        }
+
+        const delayMs = Math.min(this.connectionRetryDelayMs * 2 ** (attempt - 1), 30_000);
+        this.logger.warn(
+          `Prisma ${pool} database connection attempt ${attempt}/${this.connectionRetryAttempts} failed: ${message}. Retrying in ${delayMs}ms.`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
+  }
+
+  /**
+   * Validates that all Prisma migrations have been applied to the database.
+   * In production/strict mode, pending or failed migrations cause a critical
+   * error log. The application still starts (to avoid breaking CI/dev), but
+   * the error is clearly surfaced for operators.
+   */
+  async validateMigrations(): Promise<MigrationCheckResult> {
+    const migrationsDir = getDefaultMigrationsDir();
+    const result = await checkMigrationStatus(this, migrationsDir);
+
+    if (!result.upToDate) {
+      this.logger.error(
+        `Migration status check failed: ${result.message}`,
+        JSON.stringify({
+          pending: result.pending.map((m) => m.name),
+          failed: result.failed.map((m) => m.name),
+        }),
+      );
+    } else if (result.migrations.length > 0) {
+      this.logger.log(result.message);
+    }
+
+    if (!result.upToDate) {
+      throw new Error(`Database migrations are not up to date: ${result.message}`);
+    }
+
+    return result;
   }
 
   async onModuleDestroy(): Promise<void> {
     await this.$disconnect();
     await this.workerClient.$disconnect();
+  }
+
+  /**
+   * Reads live connection counts for this database from Postgres'
+   * `pg_stat_activity`. Prisma's Rust query engine doesn't expose pool
+   * internals (active/idle/waiting) through the Node client, so this is the
+   * only accurate source for those numbers — used by MetricsService to
+   * publish `db_pool_connections`.
+   */
+  async getPoolStats(): Promise<{ active: number; idle: number; waiting: number }> {
+    try {
+      const rows = await this.$queryRawUnsafe<
+        { state: string | null; wait_event_type: string | null; count: bigint }[]
+      >(
+        `SELECT state, wait_event_type, count(*) AS count
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+         GROUP BY state, wait_event_type`,
+      );
+
+      let active = 0;
+      let idle = 0;
+      let waiting = 0;
+
+      for (const row of rows) {
+        const count = Number(row.count);
+        if (row.wait_event_type === 'Lock') {
+          waiting += count;
+        } else if (row.state === 'active') {
+          active += count;
+        } else if (row.state?.startsWith('idle')) {
+          idle += count;
+        }
+      }
+
+      return { active, idle, waiting };
+    } catch (error) {
+      this.logger.warn(`Failed to read pool stats from pg_stat_activity: ${(error as Error).message}`);
+      return { active: 0, idle: 0, waiting: 0 };
+    }
   }
 
   /** Registers a Nest shutdown hook so the process closes the pool cleanly. */

@@ -1,6 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Queues } from '../queues/queues.constants';
 import { WorkerMetricsService } from '../modules/metrics/worker-metrics.service';
+import { runWorkerJob, WorkerJob } from './job-worker';
 
 export interface NotificationJobPayload {
   notificationId: string;
@@ -27,17 +28,20 @@ export class NotificationDeliveryWorker {
     @Optional() private readonly workerMetrics?: WorkerMetricsService,
   ) {}
 
-  async process(job: { name: string; data: NotificationJobPayload }): Promise<void> {
+  async process(job: WorkerJob<NotificationJobPayload>): Promise<void> {
     const execute = async (): Promise<void> => {
-      this.logger.log(`[${job.name}] deliver ${job.data.channel} → ${job.data.recipient}`);
+      this.logger.log(`[${job.name ?? 'notification-delivery'}] deliver ${job.data.channel} → ${job.data.recipient}`);
       // Delivery is performed by the Notifications module dispatch layer; this
       // worker only owns the queue cadence and retry semantics.
     };
 
-    if (this.workerMetrics) {
-      await this.workerMetrics.instrumentJob(this.queue, job.name, execute);
-    } else {
-      await execute();
-    }
+    await runWorkerJob({
+      queue: this.queue,
+      job,
+      logger: this.logger,
+      metrics: this.workerMetrics,
+      defaultJobName: 'notification-delivery',
+      handler: execute,
+    });
   }
 }

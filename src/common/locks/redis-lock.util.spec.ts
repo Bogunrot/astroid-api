@@ -140,6 +140,43 @@ describe('RedisLock', () => {
       await expect(lock.withLock('agent-1', fn, 5000, 2, 0)).rejects.toThrow('boom');
       expect(redis.eval).toHaveBeenCalledTimes(1);
     });
+
+    it('allows only one concurrent handler for the same resource key', async () => {
+      let held = false;
+      let finishHandler!: () => void;
+      let signalEntered!: () => void;
+      const handlerGate = new Promise<void>((resolve) => {
+        finishHandler = resolve;
+      });
+      const handlerEntered = new Promise<void>((resolve) => {
+        signalEntered = resolve;
+      });
+      redis.set.mockImplementation(async () => {
+        if (held) return null;
+        held = true;
+        return 'OK';
+      });
+      redis.eval.mockImplementation(async () => {
+        held = false;
+        return 1;
+      });
+      const handler = vi.fn(async () => {
+        signalEntered();
+        await handlerGate;
+      });
+
+      const first = lock.withLock('wallet:1', handler);
+      await handlerEntered;
+
+      await expect(lock.withLock('wallet:1', handler)).rejects.toBeInstanceOf(
+        LockNotAcquiredException,
+      );
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      finishHandler();
+      await first;
+      expect(held).toBe(false);
+    });
   });
 
   it('disconnects the shared client on module destroy', () => {

@@ -77,7 +77,6 @@ export class StellarHealthIndicator {
         signal: controller.signal,
         headers: { Accept: 'application/json' },
       });
-      clearTimeout(timer);
       const latencyMs = Date.now() - start;
 
       if (!response.ok) {
@@ -101,7 +100,6 @@ export class StellarHealthIndicator {
         protocolVersion: data.protocol_version || undefined,
       };
     } catch (err) {
-      clearTimeout(timer);
       const latencyMs = Date.now() - start;
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Horizon health check failed for ${url}: ${message}`);
@@ -111,6 +109,8 @@ export class StellarHealthIndicator {
         url,
         error: message || 'Connection failed',
       };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -130,7 +130,6 @@ export class StellarHealthIndicator {
           method: 'getHealth',
         }),
       });
-      clearTimeout(timer);
       const latencyMs = Date.now() - start;
 
       if (!response.ok) {
@@ -155,7 +154,6 @@ export class StellarHealthIndicator {
         ledgerSequence: data.result?.latestLedger || undefined,
       };
     } catch (err) {
-      clearTimeout(timer);
       const latencyMs = Date.now() - start;
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Soroban RPC health check failed for ${url}: ${message}`);
@@ -165,6 +163,8 @@ export class StellarHealthIndicator {
         url,
         error: message || 'Connection failed',
       };
+    } finally {
+      clearTimeout(timer);
     }
   }
 }

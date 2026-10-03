@@ -5,6 +5,7 @@ import { EventBusService } from '../events/event-bus.service';
 import { DomainEventName } from '../events/event-names';
 import { Queues } from '../queues/queues.constants';
 import { WorkerMetricsService } from '../modules/metrics/worker-metrics.service';
+import { runWorkerJob, WorkerJob } from './job-worker';
 
 export interface BalanceSyncJob {
   walletId: string;
@@ -35,12 +36,11 @@ export class BalanceWorker {
     @Optional() private readonly workerMetrics?: WorkerMetricsService,
   ) {}
 
-  async process(job: { data: BalanceSyncJob; name?: string }): Promise<{
+  async process(job: WorkerJob<BalanceSyncJob>): Promise<{
     address: string;
     balanceCount: number;
     alerts: Array<{ asset: string; balance: string; threshold: number }>;
   }> {
-    const jobName = job.name ?? 'balance-sync';
     const { walletId, stellarAddress, network, organizationId } = job.data;
 
     const execute = async (): Promise<{
@@ -110,10 +110,13 @@ export class BalanceWorker {
       };
     };
 
-    if (this.workerMetrics) {
-      return this.workerMetrics.instrumentJob(this.queue, jobName, execute);
-    }
-
-    return execute();
+    return runWorkerJob({
+      queue: this.queue,
+      job,
+      logger: this.logger,
+      metrics: this.workerMetrics,
+      defaultJobName: 'balance-sync',
+      handler: execute,
+    });
   }
 }

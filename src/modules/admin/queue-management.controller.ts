@@ -8,7 +8,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiOperation, ApiTags, ApiResponse } from '@nestjs/swagger';
+import { ApiOperation, ApiTags, ApiResponse, ApiParam, ApiQuery, ApiBearerAuth } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
@@ -20,6 +20,8 @@ import {
   batchRetryFilterSchema,
   BatchPurgeFilterDto,
   batchPurgeFilterSchema,
+  ListFailedJobsFilterDtoSwagger,
+  BatchOperationFilterDtoSwagger,
 } from './queue-management.dto';
 import {
   FailedJobInspection,
@@ -41,6 +43,7 @@ import {
  * operations with granular error reporting.
  */
 @ApiTags('admin-queue-management')
+@ApiBearerAuth('access-token')
 @Controller('admin/queues')
 @Roles(UserRole.OWNER, UserRole.ADMIN)
 export class QueueManagementController {
@@ -57,6 +60,7 @@ export class QueueManagementController {
       'Returns a paginated list of failed jobs across all queues or a specific queue. ' +
       'Supports filtering by failed reason substring, job name, and time range.',
   })
+  @ApiQuery({ type: ListFailedJobsFilterDtoSwagger })
   @ApiResponse({ status: 200, description: 'Paginated list of failed jobs' })
   async listFailedJobs(
     @Query(new ZodValidationPipe(listFailedJobsFilterSchema)) query: ListFailedJobsFilterDto,
@@ -71,6 +75,8 @@ export class QueueManagementController {
       'Returns detailed information about a specific failed job including ' +
       'payload, error details, stack trace, and derived status.',
   })
+  @ApiParam({ name: 'queue', description: 'Queue to inspect', example: 'webhooks' })
+  @ApiParam({ name: 'id', description: 'BullMQ job id', example: '42' })
   @ApiResponse({ status: 200, description: 'Job inspection details' })
   @ApiResponse({ status: 404, description: 'Job not found' })
   async inspectJob(
@@ -108,6 +114,7 @@ export class QueueManagementController {
       'Retries failed jobs matching the specified filter criteria. ' +
       'Returns granular results including per-job success/failure counts.',
   })
+  @ApiQuery({ type: BatchOperationFilterDtoSwagger })
   @ApiResponse({ status: 200, description: 'Batch retry results' })
   async batchRetry(
     @Query(new ZodValidationPipe(batchRetryFilterSchema)) query: BatchRetryFilterDto,
@@ -123,6 +130,8 @@ export class QueueManagementController {
       'Retries all failed jobs in the specified queue, optionally filtered by ' +
       'reason, job name, and time range.',
   })
+  @ApiParam({ name: 'queue', description: 'Target queue name', example: 'webhooks' })
+  @ApiQuery({ type: BatchOperationFilterDtoSwagger })
   @ApiResponse({ status: 200, description: 'Batch retry results' })
   async batchRetryInQueue(
     @Param('queue') queue: string,
@@ -139,7 +148,11 @@ export class QueueManagementController {
       'Permanently removes failed jobs matching the specified filter criteria. ' +
       'This is a destructive operation — purged jobs cannot be recovered.',
   })
-  @ApiResponse({ status: 200, description: 'Batch purge results' })
+  @ApiQuery({ type: BatchOperationFilterDtoSwagger })
+  @ApiResponse({
+    status: 200,
+    description: 'Batch purge results',
+  })
   async batchPurge(
     @Query(new ZodValidationPipe(batchPurgeFilterSchema)) query: BatchPurgeFilterDto,
   ): Promise<BatchPurgeResult> {
@@ -154,7 +167,12 @@ export class QueueManagementController {
       'Permanently removes all failed jobs in the specified queue, optionally ' +
       'filtered by reason, job name, and time range.',
   })
-  @ApiResponse({ status: 200, description: 'Batch purge results' })
+  @ApiParam({ name: 'queue', description: 'Target queue name', example: 'webhooks' })
+  @ApiQuery({ type: BatchOperationFilterDtoSwagger })
+  @ApiResponse({
+    status: 200,
+    description: 'Batch purge results',
+  })
   async batchPurgeInQueue(
     @Param('queue') queue: string,
     @Query(new ZodValidationPipe(batchPurgeFilterSchema)) query: BatchPurgeFilterDto,

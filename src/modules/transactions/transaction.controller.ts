@@ -17,12 +17,14 @@ import {
   simulateTransactionSchema,
   SimulateTransactionInput,
 } from './transaction.dto';
+import { SpendingLimitGuard, RequireSpendingLimitCheck } from './guards/spending-limit.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuditAction } from '../../common/decorators/audit-action.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { UseWalletLock } from '../../common/locks/wallet-lock.decorator';
 import { UseTransactionLock } from '../../common/locks/transaction-lock.decorator';
+import { AgentThrottlerGuard } from '../../common/guards/agent-throttler.guard';
 import { AuthenticatedUser } from '../../common/interfaces/authenticated-user.interface';
 import { PaginationQuery, paginationQuerySchema } from '../../common/helpers/pagination';
 import { ApiEnvelope } from '../../common/decorators/api-envelope.decorator';
@@ -33,6 +35,7 @@ import {
 
 @ApiTags('transactions')
 @ApiBearerAuth('access-token')
+@UseGuards(AgentThrottlerGuard)
 @Controller('transactions')
 export class TransactionController {
   constructor(private readonly transactionService: TransactionService) {}
@@ -60,8 +63,9 @@ export class TransactionController {
 
   @Post()
   @Roles(UserRole.OWNER, UserRole.ADMIN, UserRole.FINANCE, UserRole.DEVELOPER)
-  @UseGuards(SlidingWindowThrottlerGuard)
+  @UseGuards(SlidingWindowThrottlerGuard, SpendingLimitGuard)
   @SlidingWindowLimit(30, 60)
+  @RequireSpendingLimitCheck()
   @UseWalletLock()
   @UseTransactionLock({ attempts: 3, retryDelayMs: 50 })
   @AuditAction('TRANSFER_FUNDS')
@@ -69,7 +73,9 @@ export class TransactionController {
     summary: 'Create a transaction (runs the full governance pipeline)',
     description:
       'Evaluates policies, scores risk and checks budgets. Auto-executes when permitted, ' +
-      'otherwise creates an approval proposal and returns requiresApproval=true.',
+      'otherwise creates an approval proposal and returns requiresApproval=true. ' +
+      'Agent transactions are additionally evaluated against daily/weekly/monthly spending ' +
+      'limit policies before reaching the service layer.',
   })
   @ApiBody({ type: CreateTransactionDto })
   @ApiEnvelope(CreateTransactionDto as never)
@@ -78,11 +84,16 @@ export class TransactionController {
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 403, description: 'Insufficient permissions' })
   @ApiResponse({ status: 409, description: 'Insufficient budget or risk threshold exceeded' })
+  @ApiResponse({
+    status: 422,
+    description: 'Transaction blocked by spending limit policy (POLICY_VIOLATION)',
+  })
   create(
     @CurrentUser() user: AuthenticatedUser,
     @Body(new ZodValidationPipe(createTransactionSchema)) body: CreateTransactionInput,
   ) {
-    return this.transactionService.create(user.organizationId, user.id, body);
+    const actorId = user.isApiKey ? user.createdById ?? user.id : user.id;
+    return this.transactionService.create(user.organizationId, actorId, body);
   }
 
   @Post('simulate')

@@ -13,16 +13,8 @@ export class AnalyticsService {
   /** High-level overview cards for the dashboard home. */
   async overview(organizationId: string) {
     const since30d = new Date(Date.now() - 30 * 86_400_000);
-    const [agents, wallets, pendingProposals, allTime, last30d, byStatus, byRisk] =
-      await Promise.all([
-        this.repository.countAgents(organizationId),
-        this.repository.countWallets(organizationId),
-        this.repository.countPendingProposals(organizationId),
-        this.repository.aggregateSpend(organizationId),
-        this.repository.aggregateSpend(organizationId, since30d),
-        this.repository.groupByStatus(organizationId),
-        this.repository.groupByRiskBand(organizationId),
-      ]);
+    const { agents, wallets, pendingProposals, allTime, last30d, byStatus, byRisk } =
+      await this.repository.overview(organizationId, since30d);
 
     return {
       counts: {
@@ -50,12 +42,10 @@ export class AnalyticsService {
   /** Completed spend grouped by initiating agent. */
   async spendByAgent(organizationId: string) {
     const rows = await this.repository.spendByAgent(organizationId);
-    return rows
-      .map((row) => ({
-        agentId: row.agentId,
-        totalSpent: (row._sum.amount ?? 0).toString(),
-        transactionCount: row._count._all,
-      }))
-      .sort((a, b) => Number(b.totalSpent) - Number(a.totalSpent));
+    return rows.map((row) => ({
+      agentId: row.agentId,
+      totalSpent: (row._sum.amount ?? 0).toString(),
+      transactionCount: row._count._all,
+    }));
   }
 }

@@ -14,6 +14,7 @@ import { createApiKeySchema, CreateApiKeyInput, CreateApiKeyDto, ApiKeyCreatedDt
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuditAction } from '../../common/decorators/audit-action.decorator';
+import { AuditLog } from '../../common/decorators/audit-log.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { AuthenticatedUser } from '../../common/interfaces/authenticated-user.interface';
 import { PaginationQuery, paginationQuerySchema } from '../../common/helpers/pagination';
@@ -47,6 +48,7 @@ export class ApiKeyController {
   @Post()
   @Roles(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
   @AuditAction('AGENT_KEY_ROTATED')
+  @AuditLog({ action: 'AGENT_KEY_CREATED', entity: 'ApiKey' })
   @ApiOperation({
     summary: 'Create an API key',
     description:
@@ -72,6 +74,7 @@ export class ApiKeyController {
   @Delete(':id')
   @Roles(UserRole.OWNER, UserRole.ADMIN, UserRole.DEVELOPER)
   @AuditAction('AGENT_KEY_REVOKED')
+  @AuditLog({ action: 'AGENT_KEY_REVOKED', entity: 'ApiKey' })
   @ApiOperation({
     summary: 'Revoke an API key',
     description:
