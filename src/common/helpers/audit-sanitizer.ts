@@ -33,6 +33,11 @@ const SENSITIVE_FIELDS = new Set([
 /** Sentinel value used to replace scrubbed secrets while preserving structure. */
 export const REDACTED = '[REDACTED]';
 
+/** True when `key` names a field whose value must never be logged or audited. */
+export function isSensitiveField(key: string): boolean {
+  return SENSITIVE_FIELDS.has(key.toLowerCase());
+}
+
 /**
  * Recursively removes sensitive fields from audit payloads, replacing values
  * with `[REDACTED]` so the surrounding structure is preserved without leaking
@@ -52,7 +57,7 @@ export function sanitizeAuditPayload<T>(data: T): T {
   if (typeof data === 'object') {
     const sanitized: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-      if (SENSITIVE_FIELDS.has(key.toLowerCase())) {
+      if (isSensitiveField(key)) {
         sanitized[key] = REDACTED;
       } else {
         sanitized[key] = sanitizeAuditPayload(value);

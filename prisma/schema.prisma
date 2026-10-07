@@ -202,6 +202,7 @@ model Organization {
   notifications Notification[]
   memoryRecords MemoryRecord[]
   domainEvents  DomainEvent[]
+  riskAssessments RiskAssessment[]
 
   @@index([status])
   @@index([createdAt])
@@ -416,6 +417,7 @@ model Transaction {
   @@index([organizationId])
   @@index([walletId])
   @@index([agentId])
+  @@index([organizationId, status, deletedAt, agentId])
   @@index([status])
   @@index([createdAt])
   @@index([stellarHash])
@@ -451,6 +453,8 @@ model Proposal {
   @@index([status])
   @@index([transactionId])
   @@index([createdAt])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, status, createdAt])
   @@map("proposals")
 }
 
@@ -495,6 +499,7 @@ model AuditLog {
   // `x-correlation-id`). Not part of the hash chain — it's correlation
   // metadata, not tamper-evident content.
   requestId      String?
+  sourceEventId  String?  @unique
   previousHash   String?  // SHA-256 hash of the preceding audit log entry
   hash           String?  // SHA-256 hash of this entry (links to previous)
   createdAt      DateTime @default(now())
@@ -534,6 +539,8 @@ model Notification {
   @@index([userId])
   @@index([read])
   @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([organizationId, userId, read, createdAt])
   @@map("notifications")
 }
 
@@ -668,6 +675,8 @@ model MemoryRecord {
   @@index([transactionId])
   @@index([conversationId])
   @@index([createdAt])
+  @@index([organizationId, createdAt])
+  @@index([agentId, createdAt])
   @@map("memory_records")
 }
 
@@ -764,4 +773,27 @@ model CleanupJobLog {
 
   @@index([jobName, createdAt])
   @@map("cleanup_job_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Risk Assessment  (historical risk scoring for compliance and analytics)
+// ---------------------------------------------------------------------------
+
+model RiskAssessment {
+  id             String   @id @default(uuid(7))
+  organizationId String
+  transactionId  String   @unique
+  score          Int
+  band           RiskBand
+  factors        Json     @default("{}")
+  canAutoExecute Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([score])
+  @@index([band])
+  @@index([createdAt])
+  @@map("risk_assessments")
 }

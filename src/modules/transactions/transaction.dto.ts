@@ -3,6 +3,19 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { stellarMemoTypeSchema } from '../../common/validators/stellar-memo.schema';
 import { stellarAddressSchema } from '../../common/validators/stellar-address.schema';
 
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number().finite(),
+    z.boolean(),
+    z.null(),
+    z.array(jsonValueSchema),
+    z.record(jsonValueSchema),
+  ]),
+);
+
 const amountString = z
   .string()
   .regex(/^\d+(\.\d{1,7})?$/, 'Amount must be a positive decimal with up to 7 places')
@@ -20,7 +33,7 @@ export const createTransactionSchema = z
     memoType: stellarMemoTypeSchema.optional(),
     memoValue: z.string().optional(),
     purpose: z.string().max(280).optional(),
-    metadata: z.record(z.unknown()).default({}),
+    metadata: z.record(jsonValueSchema).default({}),
   })
   .strict()
   .superRefine((data, ctx) => {

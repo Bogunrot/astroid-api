@@ -74,7 +74,7 @@ export class OrganizationService {
     }
     const pagination = toPrismaPagination(query, MEMBER_SORTABLE);
     const { items, total } = await this.repository.findMembersAndCount(where, pagination);
-    return new Paginated(items, buildPaginationMeta(total, query.page, query.limit));
+    return new Paginated(items, buildPaginationMeta(total, query));
   }
 
   async inviteMember(organizationId: string, actorId: string, input: InviteMemberInput) {

@@ -40,6 +40,7 @@ describe('ApiKeyStrategy', () => {
       expect(result).toEqual({
         id: 'key-123',
         keyId: 'key-123',
+        apiKeyId: 'key-123',
         organizationId: 'org-456',
         createdById: 'user-789',
         name: 'Test Key',

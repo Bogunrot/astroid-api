@@ -10,6 +10,7 @@ import {
   WalletStatus,
 } from '@prisma/client';
 import { TransactionRepository } from './transaction.repository';
+import { SpendingLimitService } from './spending-limit.service';
 import { CreateTransactionInput } from './transaction.dto';
 import { TransactionsValidator } from './transactions.validator';
 import { WalletService, toNetworkName } from '../wallets/wallet.service';
@@ -68,6 +69,7 @@ export class TransactionService {
     private readonly stellar: StellarService,
     private readonly eventBus: EventBusService,
     private readonly prisma: PrismaService,
+    private readonly spendingLimits: SpendingLimitService,
   ) {}
 
   async create(organizationId: string, actorId: string, input: CreateTransactionInput) {
@@ -77,12 +79,33 @@ export class TransactionService {
 
     // 2.5. Velocity limit check for agent spending
     if (input.agentId) {
-      await this.policies.checkVelocityLimit(input.agentId, amount, input.asset);
+      await this.policies.checkVelocityLimit(organizationId, input.agentId, amount, input.asset, actorId);
     }
 
-    // 3. Policy evaluation — a hard failure blocks the transaction outright.
-    const intent = this.toIntent(organizationId, input, amount);
-    const policyResult = await this.policies.evaluateIntent(intent, actorId);
+    // 2.6. Spending limit evaluation — atomically fetches daily/weekly/monthly
+    //      aggregates and evaluates periodic budget caps. On violation, writes
+    //      an audit log entry and throws PolicyViolationException (HTTP 422).
+    //      Returns the aggregates so we can reuse them in step 3 below.
+    const baseIntent = this.toIntent(organizationId, input, amount);
+    let enrichedIntent = baseIntent;
+    if (input.agentId) {
+      const aggregates = await this.spendingLimits.aggregateSpend(input.agentId, input.asset);
+      enrichedIntent = {
+        ...baseIntent,
+        spentToday: aggregates.spentToday,
+        spentThisWeek: aggregates.spentThisWeek,
+        spentThisMonth: aggregates.spentThisMonth,
+      };
+      // evaluateSpendingLimits uses the enriched intent so periodic limit
+      // checks run against real aggregates — it is a no-op when no periodic
+      // limit policy is configured, so the overhead is minimal.
+      await this.spendingLimits.evaluateSpendingLimits(enrichedIntent, actorId);
+    }
+
+    // 3. Full policy evaluation — evaluates all rule types (maxAmount, assets,
+    //    recipients, time windows, emergency lock, periodic limits) with real
+    //    spend aggregates already embedded in the intent.
+    const policyResult = await this.policies.evaluateIntent(enrichedIntent, actorId);
     if (!policyResult.passed) {
       throw new DomainException(
         ErrorCode.POLICY_VIOLATION,
@@ -249,7 +272,7 @@ export class TransactionService {
     }
     const pagination = toPrismaPagination(query, SORTABLE);
     const { items, total } = await this.repository.findManyAndCount(where, pagination);
-    return new Paginated(items, buildPaginationMeta(total, query.page, query.limit));
+    return new Paginated(items, buildPaginationMeta(total, query));
   }
 
   async getOrThrow(organizationId: string, id: string): Promise<Transaction> {

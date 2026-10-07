@@ -13,6 +13,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { AuthenticatedUser } from '../../common/interfaces/authenticated-user.interface';
 import { PaginationQuery, paginationQuerySchema } from '../../common/helpers/pagination';
+import { ApiPaginationQuery } from '../../common/decorators/api-pagination-query.decorator';
 
 @ApiTags('notifications')
 @ApiBearerAuth('access-token')
@@ -27,8 +28,7 @@ export class NotificationController {
       'Returns a paginated list of notifications for the authenticated user. ' +
       'Supports filtering by read status.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiPaginationQuery()
   @ApiQuery({ name: 'unread', required: false, type: Boolean, description: 'Filter by unread status' })
   @ApiResponse({ status: 200, description: 'Paginated list of notifications' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })

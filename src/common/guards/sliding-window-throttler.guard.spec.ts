@@ -3,9 +3,19 @@ import { ErrorCode } from '../constants/error-codes';
 import { SlidingWindowThrottlerGuard } from './sliding-window-throttler.guard';
 
 const exec = vi.fn();
-const chain = { zremrangebyscore: vi.fn().mockReturnThis(), zcard: vi.fn().mockReturnThis(), zadd: vi.fn().mockReturnThis(), expire: vi.fn().mockReturnThis(), exec };
+const chain = {
+  zremrangebyscore: vi.fn().mockReturnThis(),
+  zcard: vi.fn().mockReturnThis(),
+  zadd: vi.fn().mockReturnThis(),
+  expire: vi.fn().mockReturnThis(),
+  exec,
+};
 
-function makeContext(user?: Record<string, string>, ip = '127.0.0.1', headers: Record<string, string> = {}) {
+function makeContext(
+  user?: Record<string, unknown>,
+  ip = '127.0.0.1',
+  headers: Record<string, string> = {},
+) {
   const response = { setHeader: vi.fn() };
   const request = { user, ip, headers };
   const handler = vi.fn();
@@ -19,14 +29,26 @@ function makeContext(user?: Record<string, string>, ip = '127.0.0.1', headers: R
 
 function makeGuard(redis: Record<string, unknown>, limit = 2) {
   const reflector = { getAllAndOverride: vi.fn().mockReturnValue(undefined) };
-  const config = { get: vi.fn((key: string, fallback: unknown) => key === 'rateLimit.maxRequests' ? limit : fallback) };
+  const config = {
+    get: vi.fn((key: string, fallback: unknown) =>
+      key === 'rateLimit.maxRequests' ? limit : fallback,
+    ),
+  };
   const guard = new SlidingWindowThrottlerGuard(reflector as never, config as never);
   Object.assign(guard, { redis });
   return guard;
 }
 
 describe('SlidingWindowThrottlerGuard', () => {
-  beforeEach(() => { vi.clearAllMocks(); exec.mockResolvedValue([[null, 0], [null, 0], [null, 1], [null, 1]]); });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    exec.mockResolvedValue([
+      [null, 0],
+      [null, 0],
+      [null, 1],
+      [null, 1],
+    ]);
+  });
 
   it('allows requests and emits standard rate-limit headers', async () => {
     const { context, response } = makeContext({ organizationId: 'org-1' });
@@ -41,10 +63,17 @@ describe('SlidingWindowThrottlerGuard', () => {
   });
 
   it('rejects an exhausted window with Retry-After', async () => {
-    exec.mockResolvedValue([[null, 0], [null, 2], [null, 1], [null, 1]]);
+    exec.mockResolvedValue([
+      [null, 0],
+      [null, 2],
+      [null, 1],
+      [null, 1],
+    ]);
     const { context, response } = makeContext({ organizationId: 'org-1' });
     const guard = makeGuard({ multi: () => chain });
-    await expect(guard.canActivate(context as never)).rejects.toMatchObject({ code: ErrorCode.RATE_LIMITED });
+    await expect(guard.canActivate(context as never)).rejects.toMatchObject({
+      code: ErrorCode.RATE_LIMITED,
+    });
     expect(response.setHeader).toHaveBeenCalledWith('X-RateLimit-Remaining', 0);
     expect(response.setHeader).toHaveBeenCalledWith('Retry-After', expect.any(Number));
   });
@@ -60,6 +89,19 @@ describe('SlidingWindowThrottlerGuard', () => {
     expect(redis.multi).toHaveBeenCalledTimes(2);
   });
 
+  it('uses the authenticated API key ID instead of its organization for throttling', async () => {
+    const { context } = makeContext({
+      organizationId: 'org-1',
+      apiKeyId: 'key-1',
+      isApiKey: true,
+    });
+    const guard = makeGuard({ multi: () => chain });
+
+    await guard.canActivate(context as never);
+
+    expect(chain.zremrangebyscore.mock.calls[0][0]).toContain(':key:key-1:');
+  });
+
   it('falls back to a hashed API key scope when unauthenticated but keyed', async () => {
     const redis = { multi: vi.fn(() => chain) };
     const withApiKey = makeContext(undefined, '192.0.2.1', { 'x-api-key': 'ast_secret-key' });
@@ -73,10 +115,28 @@ describe('SlidingWindowThrottlerGuard', () => {
   it('fails open and logs when Redis is unavailable', async () => {
     const logger = { error: vi.fn() };
     const { context, response } = makeContext({ organizationId: 'org-1' });
-    const guard = makeGuard({ multi: () => { throw new Error('offline'); } });
+    const guard = makeGuard({
+      multi: () => {
+        throw new Error('offline');
+      },
+    });
     Object.assign(guard, { logger });
     await expect(guard.canActivate(context as never)).resolves.toBe(true);
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('allowing request'));
     expect(response.setHeader).toHaveBeenCalledWith('X-RateLimit-Remaining', 2);
+  });
+
+  it('supports enterprise tier dynamic limits', async () => {
+    const { context, response } = makeContext({ organizationId: 'org-ent', tier: 'enterprise' });
+    const guard = makeGuard({ multi: () => chain }, 100);
+    expect(await guard.canActivate(context as never)).toBe(true);
+    expect(response.setHeader).toHaveBeenCalledWith('X-RateLimit-Limit', 500);
+  });
+
+  it('supports pro tier dynamic limits', async () => {
+    const { context, response } = makeContext({ organizationId: 'org-pro', tier: 'pro' });
+    const guard = makeGuard({ multi: () => chain }, 100);
+    expect(await guard.canActivate(context as never)).toBe(true);
+    expect(response.setHeader).toHaveBeenCalledWith('X-RateLimit-Limit', 250);
   });
 });

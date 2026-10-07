@@ -75,3 +75,53 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   [ErrorCode.CIRCUIT_OPEN]: 503,
   [ErrorCode.LOCK_ACQUISITION_FAILED]: 409,
 };
+
+/**
+ * Short, human-readable summary of each problem type, used as the `title` of
+ * problem details responses (RFC 9457). A title describes the type of problem
+ * and must not vary between occurrences; occurrence-specific text belongs in
+ * `detail`.
+ */
+export const ERROR_TITLE: Record<ErrorCode, string> = {
+  [ErrorCode.INTERNAL_ERROR]: 'Internal Server Error',
+  [ErrorCode.VALIDATION_ERROR]: 'Validation Failed',
+  [ErrorCode.NOT_FOUND]: 'Resource Not Found',
+  [ErrorCode.CONFLICT]: 'Conflict',
+  [ErrorCode.BAD_REQUEST]: 'Bad Request',
+  [ErrorCode.RATE_LIMITED]: 'Too Many Requests',
+  [ErrorCode.NOT_IMPLEMENTED]: 'Not Implemented',
+  [ErrorCode.UNAUTHORIZED]: 'Unauthorized',
+  [ErrorCode.FORBIDDEN]: 'Forbidden',
+  [ErrorCode.INVALID_CREDENTIALS]: 'Invalid Credentials',
+  [ErrorCode.TOKEN_EXPIRED]: 'Token Expired',
+  [ErrorCode.INVALID_TOKEN]: 'Invalid Token',
+  [ErrorCode.SESSION_REVOKED]: 'Session Revoked',
+  [ErrorCode.POLICY_VIOLATION]: 'Policy Violation',
+  [ErrorCode.BUDGET_EXCEEDED]: 'Budget Exceeded',
+  [ErrorCode.INSUFFICIENT_FUNDS]: 'Insufficient Funds',
+  [ErrorCode.RISK_TOO_HIGH]: 'Risk Too High',
+  [ErrorCode.APPROVAL_REQUIRED]: 'Approval Required',
+  [ErrorCode.PROPOSAL_EXPIRED]: 'Proposal Expired',
+  [ErrorCode.PROPOSAL_NOT_PENDING]: 'Proposal Not Pending',
+  [ErrorCode.WALLET_FROZEN]: 'Wallet Frozen',
+  [ErrorCode.AGENT_NOT_ACTIVE]: 'Agent Not Active',
+  [ErrorCode.EMERGENCY_LOCK]: 'Emergency Lock Active',
+  [ErrorCode.VELOCITY_LIMIT_EXCEEDED]: 'Velocity Limit Exceeded',
+  [ErrorCode.STELLAR_ERROR]: 'Stellar Network Error',
+  [ErrorCode.INVALID_STELLAR_ADDRESS]: 'Invalid Stellar Address',
+  [ErrorCode.INVALID_STELLAR_TRANSACTION]: 'Invalid Stellar Transaction',
+  [ErrorCode.CIRCUIT_OPEN]: 'Service Temporarily Unavailable',
+  [ErrorCode.LOCK_ACQUISITION_FAILED]: 'Resource Locked',
+};
+
+/** Namespace for the problem type URIs derived from {@link ErrorCode}s. */
+export const PROBLEM_TYPE_PREFIX = 'urn:astroid:problem:';
+
+/**
+ * Stable problem type URI for an error code, e.g.
+ * `VALIDATION_ERROR` -> `urn:astroid:problem:validation-error`. A URN is used
+ * because it identifies the type without implying a dereferenceable page.
+ */
+export function problemTypeFor(code: ErrorCode): string {
+  return `${PROBLEM_TYPE_PREFIX}${code.toLowerCase().replace(/_/g, '-')}`;
+}

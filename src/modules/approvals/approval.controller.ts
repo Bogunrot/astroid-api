@@ -24,6 +24,7 @@ import { AuditAction } from '../../common/decorators/audit-action.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { AuthenticatedUser } from '../../common/interfaces/authenticated-user.interface';
 import { PaginationQuery, paginationQuerySchema } from '../../common/helpers/pagination';
+import { ApiPaginationQuery } from '../../common/decorators/api-pagination-query.decorator';
 
 @ApiTags('approvals')
 @ApiBearerAuth('access-token')
@@ -38,8 +39,7 @@ export class ApprovalController {
       'Returns a paginated list of approval proposals for the current organization. ' +
       'Supports filtering by status.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiPaginationQuery()
   @ApiQuery({ name: 'status', required: false, enum: ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'], description: 'Filter by proposal status' })
   @ApiResponse({ status: 200, description: 'Paginated list of proposals' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })

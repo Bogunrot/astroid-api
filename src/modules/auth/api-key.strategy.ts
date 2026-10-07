@@ -70,6 +70,7 @@ export class ApiKeyStrategy extends PassportStrategy(HeaderApiKeyPassportStrateg
     const principal: AuthenticatedApiKey = {
       id: apiKey.id,
       keyId: apiKey.id,
+      apiKeyId: apiKey.id,
       organizationId: apiKey.organizationId,
       createdById: apiKey.createdById,
       name: apiKey.name,

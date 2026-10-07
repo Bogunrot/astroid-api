@@ -15,6 +15,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { PaginationQuery, paginationQuerySchema } from '../../common/helpers/pagination';
+import { ApiPaginationQuery } from '../../common/decorators/api-pagination-query.decorator';
 
 @ApiTags('memory')
 @ApiBearerAuth('access-token')
@@ -29,8 +30,7 @@ export class MemoryController {
       'Returns a paginated list of memory records for the current organization. ' +
       'Memory records capture agent decisions, reasoning, and outcomes for audit and learning.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiPaginationQuery()
   @ApiQuery({ name: 'search', required: false, type: String, description: 'Full-text search across task, reason, and summary fields' })
   @ApiQuery({ name: 'agentId', required: false, type: String, description: 'Filter by agent UUID' })
   @ApiResponse({ status: 200, description: 'Paginated list of memory records' })

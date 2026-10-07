@@ -25,7 +25,9 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
     "db:seed": "ts-node prisma/seed.ts",
-    "db:verify": "scripts/verify-migrations.sh"
+    "db:verify": "bash scripts/verify-migrations.sh",
+    "db:migrate": "ts-node src/database/migrate.cli.ts",
+    "db:verify:static": "DATABASE_URL= SHADOW_DATABASE_URL= bash scripts/verify-migrations.sh"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
@@ -41,6 +43,7 @@
     "@nestjs/platform-express": "10.4.15",
     "@nestjs/schedule": "^4.1.2",
     "@nestjs/swagger": "7.4.2",
+    "@nestjs/terminus": "^10.3.0",
     "@nestjs/throttler": "6.3.0",
     "@prisma/client": "5.22.0",
     "@simplewebauthn/server": "^13.3.3",

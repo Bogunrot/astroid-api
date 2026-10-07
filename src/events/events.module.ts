@@ -1,10 +1,12 @@
 import { Global, Module } from '@nestjs/common';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { EventBusService } from './event-bus.service';
+import { TypedEventEmitter } from './typed-event-emitter.service';
 
 /**
  * Global event bus module. Wraps `@nestjs/event-emitter` and exposes the
- * EventBusService (emit + persist to the immutable ledger) to all modules.
+ * EventBusService (emit + persist to the immutable ledger) and TypedEventEmitter
+ * (type-safe event emission) to all modules.
  */
 @Global()
 @Module({
@@ -16,7 +18,7 @@ import { EventBusService } from './event-bus.service';
       verboseMemoryLeak: false,
     }),
   ],
-  providers: [EventBusService],
-  exports: [EventBusService],
+  providers: [EventBusService, TypedEventEmitter],
+  exports: [EventBusService, TypedEventEmitter],
 })
 export class EventsModule {}

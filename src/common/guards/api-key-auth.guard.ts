@@ -16,8 +16,11 @@ type ApiKeyAuthenticatedRequest = Request & {
 
 /**
  * Guard enforcing cryptographic API key authentication on protected routes.
- * Extracts the key from `x-api-key`, verifies the SHA-256 hash against PostgreSQL,
- * rejects revoked or expired keys, and attaches scoped permissions to the request.
+ * Extracts the key from `x-api-key`, verifies the Argon2id hash against PostgreSQL
+ * (with SHA-256 fallback for legacy keys), rejects revoked or expired keys, and
+ * attaches scoped permissions to the request.
+ * 
+ * Uses constant-time comparison via Argon2 verification to prevent timing attacks.
  */
 @Injectable()
 export class ApiKeyAuthGuard implements CanActivate {

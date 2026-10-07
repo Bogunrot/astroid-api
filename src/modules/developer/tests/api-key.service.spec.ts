@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiKeyService } from '../api-key.service';
 import { ApiKeyRepository } from '../api-key.repository';
 import { ConflictException, NotFoundException } from '../../../common/exceptions/domain.exception';
-import { sha256 } from '../../../utils/crypto.util';
+import { hashWithArgon2, sha256 } from '../../../utils/crypto.util';
 
 describe('ApiKeyService', () => {
   let service: ApiKeyService;
@@ -11,6 +11,7 @@ describe('ApiKeyService', () => {
     findManyAndCount: ReturnType<typeof vi.fn>;
     findById: ReturnType<typeof vi.fn>;
     findByHash: ReturnType<typeof vi.fn>;
+    findByPrefix: ReturnType<typeof vi.fn>;
     revoke: ReturnType<typeof vi.fn>;
     touchLastUsed: ReturnType<typeof vi.fn>;
   };
@@ -24,6 +25,7 @@ describe('ApiKeyService', () => {
       findManyAndCount: vi.fn(),
       findById: vi.fn(),
       findByHash: vi.fn(),
+      findByPrefix: vi.fn(),
       revoke: vi.fn(),
       touchLastUsed: vi.fn(),
     };
@@ -31,7 +33,7 @@ describe('ApiKeyService', () => {
   });
 
   describe('create', () => {
-    it('creates an API key, hashes it with SHA-256, and returns raw key only once', async () => {
+    it('creates an API key, hashes it with Argon2id, and returns raw key only once', async () => {
       repository.create.mockImplementation((data) =>
         Promise.resolve({
           id: 'key-123',
@@ -58,13 +60,14 @@ describe('ApiKeyService', () => {
       expect(result.prefix).toBe(result.key.slice(0, 14));
       expect(result.expiresAt).toBeInstanceOf(Date);
 
+      // Verify the stored hash is Argon2id format
       expect(repository.create).toHaveBeenCalledWith(
         expect.objectContaining({
           organizationId: orgId,
           createdById: userId,
           name: 'Agent Key',
           prefix: result.prefix,
-          hashedKey: sha256(result.key),
+          hashedKey: expect.stringMatching(/\$argon2id\$/),
           permissions: ['transactions:write', 'wallets:read'],
           allowedIps: ['192.168.1.1'],
         }),
@@ -110,6 +113,7 @@ describe('ApiKeyService', () => {
       repository.findManyAndCount.mockResolvedValue({ items: mockItems, total: 1 });
 
       const result = await service.list(orgId, {
+        offset: 0,
         page: 1,
         limit: 20,
         sort: 'createdAt',
@@ -128,6 +132,7 @@ describe('ApiKeyService', () => {
       repository.findManyAndCount.mockResolvedValue({ items: [], total: 0 });
 
       await service.list(orgId, {
+        offset: 0,
         page: 1,
         limit: 20,
         sort: 'createdAt',
@@ -180,26 +185,50 @@ describe('ApiKeyService', () => {
   });
 
   describe('verify', () => {
-    const rawSecret = 'ak_live_abcdef1234567890abcdef1234567890abcdef12';
-    const hash = sha256(rawSecret);
-
-    it('returns key and touches lastUsedAt when key is valid', async () => {
+    it('verifies key with Argon2id hash', async () => {
+      const rawSecret = 'ak_live_abcdef1234567890abcdef1234567890abcdef12';
+      const argonHash = await hashWithArgon2(rawSecret);
+      
       const mockKey = {
         id: 'key-1',
         name: 'Agent Key',
-        hashedKey: hash,
+        hashedKey: argonHash,
         permissions: ['transactions:write'],
         revokedAt: null,
         expiresAt: new Date(Date.now() + 86400000),
       };
-      repository.findByHash.mockResolvedValue(mockKey);
+      
+      repository.findByPrefix.mockResolvedValue([mockKey]);
       repository.touchLastUsed.mockResolvedValue({ ...mockKey, lastUsedAt: new Date() });
 
       const verified = await service.verify(rawSecret);
 
       expect(verified).toEqual(mockKey);
-      expect(repository.findByHash).toHaveBeenCalledWith(hash);
+      expect(repository.findByPrefix).toHaveBeenCalledWith(rawSecret.slice(0, 14));
       expect(repository.touchLastUsed).toHaveBeenCalledWith('key-1');
+    });
+
+    it('verifies legacy key with SHA-256 hash for backward compatibility', async () => {
+      const rawSecret = 'ak_live_abcdef1234567890abcdef1234567890abcdef12';
+      const shaHash = sha256(rawSecret);
+      
+      const mockKey = {
+        id: 'key-legacy',
+        name: 'Legacy Key',
+        hashedKey: shaHash,
+        permissions: ['transactions:read'],
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 86400000),
+      };
+      
+      repository.findByPrefix.mockResolvedValue([mockKey]);
+      repository.touchLastUsed.mockResolvedValue({ ...mockKey, lastUsedAt: new Date() });
+
+      const verified = await service.verify(rawSecret);
+
+      expect(verified).toEqual(mockKey);
+      expect(repository.findByPrefix).toHaveBeenCalledWith(rawSecret.slice(0, 14));
+      expect(repository.touchLastUsed).toHaveBeenCalledWith('key-legacy');
     });
 
     it('returns null for empty or invalid raw key input', async () => {
@@ -207,11 +236,11 @@ describe('ApiKeyService', () => {
       expect(await service.verify('   ')).toBeNull();
       expect(await service.verify(null as unknown as string)).toBeNull();
       expect(await service.verify(undefined as unknown as string)).toBeNull();
-      expect(repository.findByHash).not.toHaveBeenCalled();
+      expect(repository.findByPrefix).not.toHaveBeenCalled();
     });
 
-    it('returns null when key hash is not found in database', async () => {
-      repository.findByHash.mockResolvedValue(null);
+    it('returns null when no keys found with matching prefix', async () => {
+      repository.findByPrefix.mockResolvedValue([]);
 
       const verified = await service.verify('ak_live_unknownkey');
 
@@ -220,11 +249,16 @@ describe('ApiKeyService', () => {
     });
 
     it('returns null when key has been revoked', async () => {
-      repository.findByHash.mockResolvedValue({
-        id: 'key-revoked',
-        hashedKey: hash,
-        revokedAt: new Date(Date.now() - 10000),
-      });
+      const rawSecret = 'ak_live_abcdef1234567890abcdef1234567890abcdef12';
+      const argonHash = await hashWithArgon2(rawSecret);
+      
+      repository.findByPrefix.mockResolvedValue([
+        {
+          id: 'key-revoked',
+          hashedKey: argonHash,
+          revokedAt: new Date(Date.now() - 10000),
+        },
+      ]);
 
       const verified = await service.verify(rawSecret);
 
@@ -233,12 +267,17 @@ describe('ApiKeyService', () => {
     });
 
     it('returns null when key has expired', async () => {
-      repository.findByHash.mockResolvedValue({
-        id: 'key-expired',
-        hashedKey: hash,
-        revokedAt: null,
-        expiresAt: new Date(Date.now() - 5000),
-      });
+      const rawSecret = 'ak_live_abcdef1234567890abcdef1234567890abcdef12';
+      const argonHash = await hashWithArgon2(rawSecret);
+      
+      repository.findByPrefix.mockResolvedValue([
+        {
+          id: 'key-expired',
+          hashedKey: argonHash,
+          revokedAt: null,
+          expiresAt: new Date(Date.now() - 5000),
+        },
+      ]);
 
       const verified = await service.verify(rawSecret);
 
@@ -247,18 +286,50 @@ describe('ApiKeyService', () => {
     });
 
     it('still returns key if touchLastUsed throws a transient error', async () => {
+      const rawSecret = 'ak_live_abcdef1234567890abcdef1234567890abcdef12';
+      const argonHash = await hashWithArgon2(rawSecret);
+      
       const mockKey = {
         id: 'key-1',
-        hashedKey: hash,
+        hashedKey: argonHash,
         revokedAt: null,
         expiresAt: null,
       };
-      repository.findByHash.mockResolvedValue(mockKey);
+      
+      repository.findByPrefix.mockResolvedValue([mockKey]);
       repository.touchLastUsed.mockRejectedValue(new Error('DB connection busy'));
 
       const verified = await service.verify(rawSecret);
 
       expect(verified).toEqual(mockKey);
+    });
+
+    it('tries multiple keys with same prefix until match is found', async () => {
+      const rawSecret = 'ak_live_abcdef1234567890abcdef1234567890abcdef12';
+      const argonHash = await hashWithArgon2(rawSecret);
+      
+      const wrongKey = {
+        id: 'key-wrong',
+        hashedKey: await hashWithArgon2('different-key'),
+        revokedAt: null,
+        expiresAt: null,
+      };
+      
+      const correctKey = {
+        id: 'key-correct',
+        hashedKey: argonHash,
+        permissions: ['transactions:write'],
+        revokedAt: null,
+        expiresAt: null,
+      };
+      
+      repository.findByPrefix.mockResolvedValue([wrongKey, correctKey]);
+      repository.touchLastUsed.mockResolvedValue({ ...correctKey, lastUsedAt: new Date() });
+
+      const verified = await service.verify(rawSecret);
+
+      expect(verified).toEqual(correctKey);
+      expect(repository.touchLastUsed).toHaveBeenCalledWith('key-correct');
     });
   });
 });

@@ -16,6 +16,7 @@ import { Paginated } from '../../common/interfaces/api-response.interface';
 import { EventBusService } from '../../events/event-bus.service';
 import { DomainEventName } from '../../events/event-names';
 import { RedisLock } from '../../common/locks/redis-lock.util';
+import { PrismaTransactionService } from '../../database/prisma-transaction.service';
 
 const SORTABLE = ['createdAt', 'name', 'limitAmount', 'spent', 'period'];
 const Decimal = Prisma.Decimal;
@@ -38,6 +39,7 @@ export class BudgetService {
     private readonly repository: BudgetRepository,
     private readonly eventBus: EventBusService,
     private readonly redisLock: RedisLock,
+    private readonly transactions: PrismaTransactionService,
   ) {}
 
   async create(organizationId: string, actorId: string, input: CreateBudgetInput): Promise<Budget> {
@@ -70,7 +72,7 @@ export class BudgetService {
     }
     const pagination = toPrismaPagination(query, SORTABLE);
     const { items, total } = await this.repository.findManyAndCount(where, pagination);
-    return new Paginated(items, buildPaginationMeta(total, query.page, query.limit));
+    return new Paginated(items, buildPaginationMeta(total, query));
   }
 
   async getOrThrow(organizationId: string, id: string): Promise<Budget> {
@@ -186,11 +188,21 @@ export class BudgetService {
   /**
    * Atomically reserves (deducts) budget by incrementing spent.
    * Utilizes database row-level locking (SELECT FOR UPDATE) to prevent race conditions.
+   *
+   * The `SELECT … FOR UPDATE` lock and the following `UPDATE` must land in the
+   * *same* transaction, otherwise the lock is released before the deduction and
+   * two concurrent agents can both observe the same remaining balance. The
+   * boundary is owned here (the service), and the repository is handed the
+   * transactional client to work on.
+   *
    * @throws ConflictException if budget would be exceeded
    */
   async reserveBudget(organizationId: string, budgetId: string, amount: number) {
     try {
-      return await this.repository.reserveBudget(organizationId, budgetId, new Decimal(amount));
+      return await this.transactions.run(
+        (tx) => this.repository.reserveBudget(organizationId, budgetId, new Decimal(amount), tx),
+        { name: 'budget.reserve' },
+      );
     } catch (error: unknown) {
       const err = error as Error;
       if (err.message && err.message.includes('NotFoundException')) {

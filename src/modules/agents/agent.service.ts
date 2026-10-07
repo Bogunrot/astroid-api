@@ -94,7 +94,7 @@ export class AgentService {
     const pagination = toPrismaPagination(query, SORTABLE);
     const { items, total } = await this.repository.findManyAndCount(where, pagination);
     const decryptedItems = items.map((agent) => this.decryptAgent(agent));
-    return new Paginated(decryptedItems, buildPaginationMeta(total, query.page, query.limit));
+    return new Paginated(decryptedItems, buildPaginationMeta(total, query));
   }
 
   async getOrThrow(organizationId: string, id: string): Promise<Agent> {

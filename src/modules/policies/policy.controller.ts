@@ -23,12 +23,14 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuditAction } from '../../common/decorators/audit-action.decorator';
+import { AuditLog } from '../../common/decorators/audit-log.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { AuthenticatedUser } from '../../common/interfaces/authenticated-user.interface';
 import {
   PaginationQuery,
   paginationQuerySchema,
 } from '../../common/helpers/pagination';
+import { ApiPaginationQuery } from '../../common/decorators/api-pagination-query.decorator';
 import { ApiEnvelope } from '../../common/decorators/api-envelope.decorator';
 
 @ApiTags('policies')
@@ -44,8 +46,7 @@ export class PolicyController {
       'Returns a paginated list of policies for the current organization. ' +
       'Supports filtering by type, status, and agent.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiPaginationQuery()
   @ApiQuery({ name: 'type', required: false, enum: ['SPENDING_LIMIT', 'APPROVAL_REQUIRED', 'ALLOWLIST', 'TIME_WINDOW'], description: 'Filter by policy type' })
   @ApiQuery({ name: 'enabled', required: false, type: Boolean, description: 'Filter by enabled status' })
   @ApiEnvelope(CreatePolicyDto as never, { isArray: true })
@@ -61,6 +62,7 @@ export class PolicyController {
   @Post()
   @Roles(UserRole.OWNER, UserRole.ADMIN, UserRole.FINANCE)
   @AuditAction('POLICY_CREATED')
+  @AuditLog({ action: 'POLICY_CREATED', entity: 'Policy' })
   @ApiOperation({
     summary: 'Create a policy',
     description:
@@ -114,6 +116,7 @@ export class PolicyController {
   @Patch(':id')
   @Roles(UserRole.OWNER, UserRole.ADMIN, UserRole.FINANCE)
   @AuditAction('POLICY_UPDATED')
+  @AuditLog({ action: 'POLICY_UPDATED', entity: 'Policy' })
   @ApiOperation({
     summary: 'Update a policy',
     description:
@@ -137,6 +140,7 @@ export class PolicyController {
   @Delete(':id')
   @Roles(UserRole.OWNER, UserRole.ADMIN)
   @AuditAction('POLICY_DELETED')
+  @AuditLog({ action: 'POLICY_DELETED', entity: 'Policy' })
   @ApiOperation({
     summary: 'Delete (soft) a policy',
     description:

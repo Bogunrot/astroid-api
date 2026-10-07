@@ -3,6 +3,7 @@ import {
   ExecutionContext,
   Injectable,
   Logger,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -70,7 +71,7 @@ export class WebhookSignatureGuard implements CanActivate {
 
   constructor(
     private readonly configService: ConfigService,
-    options?: WebhookSignatureGuardOptions,
+    @Optional() options?: WebhookSignatureGuardOptions,
   ) {
     this.toleranceSeconds = options?.toleranceSeconds ?? 300;
     this.secretResolver = options?.secretResolver;

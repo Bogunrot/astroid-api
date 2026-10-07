@@ -32,6 +32,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { AuditAction } from '../../common/decorators/audit-action.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { PaginationQuery, paginationQuerySchema } from '../../common/helpers/pagination';
+import { ApiPaginationQuery } from '../../common/decorators/api-pagination-query.decorator';
 
 @ApiTags('webhooks')
 @ApiBearerAuth('access-token')
@@ -47,8 +48,7 @@ export class WebhookController {
       'Returns a paginated list of webhooks for the current organization. ' +
       'HMAC signing secrets are never included in the response.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiPaginationQuery()
   @ApiQuery({ name: 'events', required: false, type: String, description: 'Filter by event type' })
   @ApiResponse({ status: 200, description: 'Paginated list of webhooks' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })

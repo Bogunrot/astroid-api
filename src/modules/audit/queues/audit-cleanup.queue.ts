@@ -1,13 +1,19 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { PrismaService } from '../../../database/prisma.service';
 import { Queues } from '../../../queues/queues.constants';
 import { ConfigService } from '@nestjs/config';
 
 @Processor(Queues.AuditCleanup)
-export class AuditCleanupQueue extends WorkerHost {
+export class AuditCleanupQueue extends WorkerHost implements OnModuleDestroy {
   private readonly logger = new Logger(AuditCleanupQueue.name);
+
+  async onModuleDestroy() {
+    if (this.worker) {
+      await this.worker.close();
+    }
+  }
 
   constructor(
     private readonly prisma: PrismaService,

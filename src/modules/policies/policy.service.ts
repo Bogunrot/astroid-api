@@ -1,62 +1,28 @@
 import { Injectable } from '@nestjs/common';
-import { Policy, Prisma } from '@prisma/client';
-import { PolicyRepository } from './policy.repository';
+import { Policy } from '@prisma/client';
+import { SpendingPolicyService } from './spending-policy.service';
 import { PolicyEngine } from './policy.engine';
 import { CreatePolicyInput, SimulatePolicyInput, UpdatePolicyInput } from './policy.dto';
-import {
-  EvaluablePolicy,
-  PolicyConfiguration,
-  PolicyEvaluationResult,
-  TransactionIntent,
-  policyConfigurationSchemaStrict,
-} from './policy.types';
-import { NotFoundException, VelocityLimitExceededException, ValidationException } from '../../common/exceptions/domain.exception';
-import { formatZodError } from '../../common/validators/zod-error';
-import {
-  buildPaginationMeta,
-  PaginationQuery,
-  toPrismaPagination,
-} from '../../common/helpers/pagination';
-import { Paginated } from '../../common/interfaces/api-response.interface';
+import { EvaluablePolicy, PolicyConfiguration, PolicyEvaluationResult, TransactionIntent } from './policy.types';
+import { PaginationQuery } from '../../common/helpers/pagination';
 import { EventBusService } from '../../events/event-bus.service';
 import { DomainEventName } from '../../events/event-names';
-import { PrismaService } from '../../database/prisma.service';
-
-const SORTABLE = ['createdAt', 'priority', 'name', 'type'];
 
 /**
- * Manages policy definitions and exposes evaluation to other modules. Wraps the
- * pure {@link PolicyEngine} with persistence, event emission and simulation.
+ * Controller-facing façade over the policy domain. Delegates persistence and
+ * spending-policy enforcement to {@link SpendingPolicyService} and wraps every
+ * mutation with the domain events the audit ledger depends on.
  */
 @Injectable()
 export class PolicyService {
   constructor(
-    private readonly repository: PolicyRepository,
+    private readonly spendingPolicyService: SpendingPolicyService,
     private readonly engine: PolicyEngine,
     private readonly eventBus: EventBusService,
-    private readonly prisma: PrismaService,
   ) {}
 
   async create(organizationId: string, actorId: string, input: CreatePolicyInput) {
-    // Validate configuration using strict schema
-    const validationResult = policyConfigurationSchemaStrict.safeParse(input.configuration);
-    if (!validationResult.success) {
-      throw new ValidationException(
-        'Invalid policy configuration',
-        formatZodError(validationResult.error),
-      );
-    }
-
-    const policy = await this.repository.create({
-      organization: { connect: { id: organizationId } },
-      ...(input.agentId ? { agent: { connect: { id: input.agentId } } } : {}),
-      name: input.name,
-      description: input.description,
-      type: input.type,
-      configuration: validationResult.data as Prisma.InputJsonValue,
-      priority: input.priority,
-      enabled: input.enabled,
-    });
+    const policy = await this.spendingPolicyService.create(organizationId, input);
     await this.eventBus.emit(
       DomainEventName.PolicyCreated,
       { policyId: policy.id, name: policy.name, type: policy.type },
@@ -65,45 +31,16 @@ export class PolicyService {
     return policy;
   }
 
-  async list(organizationId: string, query: PaginationQuery) {
-    const where: Prisma.PolicyWhereInput = { organizationId, deletedAt: null };
-    if (query.search) {
-      where.name = { contains: query.search, mode: 'insensitive' };
-    }
-    const pagination = toPrismaPagination(query, SORTABLE);
-    const { items, total } = await this.repository.findManyAndCount(where, pagination);
-    return new Paginated(items, buildPaginationMeta(total, query.page, query.limit));
+  list(organizationId: string, query: PaginationQuery) {
+    return this.spendingPolicyService.list(organizationId, query);
   }
 
-  async getOrThrow(organizationId: string, id: string): Promise<Policy> {
-    const policy = await this.repository.findById(organizationId, id);
-    if (!policy) {
-      throw new NotFoundException('Policy', id);
-    }
-    return policy;
+  getOrThrow(organizationId: string, id: string): Promise<Policy> {
+    return this.spendingPolicyService.getOrThrow(organizationId, id);
   }
 
   async update(organizationId: string, actorId: string, id: string, input: UpdatePolicyInput) {
-    await this.getOrThrow(organizationId, id);
-    const data: Prisma.PolicyUpdateInput = {
-      name: input.name,
-      description: input.description,
-      type: input.type,
-      priority: input.priority,
-      enabled: input.enabled,
-    };
-    if (input.configuration) {
-      // Validate configuration using strict schema
-      const validationResult = policyConfigurationSchemaStrict.safeParse(input.configuration);
-      if (!validationResult.success) {
-        throw new ValidationException(
-          'Invalid policy configuration',
-          formatZodError(validationResult.error),
-        );
-      }
-      data.configuration = validationResult.data as Prisma.InputJsonValue;
-    }
-    const policy = await this.repository.update(id, data);
+    const policy = await this.spendingPolicyService.update(organizationId, id, input);
     await this.eventBus.emit(
       DomainEventName.PolicyUpdated,
       { policyId: id },
@@ -113,25 +50,25 @@ export class PolicyService {
   }
 
   async remove(organizationId: string, actorId: string, id: string) {
-    await this.getOrThrow(organizationId, id);
-    await this.repository.softDelete(id);
+    const result = await this.spendingPolicyService.remove(organizationId, id);
     await this.eventBus.emit(
       DomainEventName.PolicyDeleted,
       { policyId: id },
       { organizationId, actorId, aggregateType: 'policy', aggregateId: id },
     );
-    return { id, deleted: true };
+    return result;
   }
 
   /**
    * Evaluates an intent against all applicable stored policies. Emits a
    * PolicyEvaluated event (and PolicyViolated on failure) for the ledger.
+   * Also persists an audit log entry for compliance tracking.
    */
   async evaluateIntent(
     intent: TransactionIntent,
     actorId?: string,
   ): Promise<PolicyEvaluationResult> {
-    const policies = await this.repository.findActiveForEvaluation(
+    const policies = await this.spendingPolicyService.listActiveForEvaluation(
       intent.organizationId,
       intent.agentId,
     );
@@ -143,6 +80,9 @@ export class PolicyService {
         passed: result.passed,
         requiresApproval: result.requiresApproval,
         violations: result.violations.map((v) => v.code),
+        amount: intent.amount,
+        asset: intent.asset,
+        recipientAddress: intent.recipientAddress,
       },
       {
         organizationId: intent.organizationId,
@@ -164,6 +104,11 @@ export class PolicyService {
         },
       );
     }
+
+    if (actorId) {
+      await this.spendingPolicyService.recordEvaluationAudit(intent, result, actorId);
+    }
+
     return result;
   }
 
@@ -180,7 +125,7 @@ export class PolicyService {
       spentThisWeek: input.spentThisWeek,
       spentThisMonth: input.spentThisMonth,
     };
-    const policies = await this.repository.findActiveForEvaluation(organizationId, input.agentId);
+    const policies = await this.spendingPolicyService.listActiveForEvaluation(organizationId, input.agentId);
     const result = this.engine.evaluate(intent, policies.map(toEvaluable));
     return {
       passed: result.passed,
@@ -191,58 +136,20 @@ export class PolicyService {
   }
 
   /**
-   * Check velocity limit for an agent's spending within a rolling 24-hour window.
-   * This acts as a circuit breaker to prevent rapid draining of wallets.
+   * Checks the rolling 24-hour velocity limit for an agent's spending. Acts as
+   * a circuit breaker to prevent rapid draining of wallets. Delegates the
+   * actual enforcement to {@link SpendingPolicyService}; `organizationId` and
+   * `actorId` are accepted for call-site symmetry with the rest of the
+   * transaction governance pipeline but are not needed by the check itself.
    */
-  async checkVelocityLimit(agentId: string, amount: number, assetCode: string): Promise<void> {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    // Query historical agent transactions from the last 24 hours
-    const transactions = await this.prisma.transaction.findMany({
-      where: {
-        agentId,
-        status: { in: ['COMPLETED', 'CONFIRMED'] },
-        asset: assetCode,
-        createdAt: { gte: twentyFourHoursAgo },
-      },
-      select: {
-        amount: true,
-      },
-    });
-
-    // Sum up transaction volumes
-    const spentInWindow = transactions.reduce(
-      (sum, tx) => sum + Number(tx.amount),
-      0,
-    );
-
-    // Retrieve the agent's active daily limit from policies
-    const policies = await this.repository.findActiveForEvaluationByAgent(agentId);
-    const dailyLimitPolicy = policies.find((policy) => {
-      const config = policy.configuration as PolicyConfiguration;
-      return config.dailyLimit !== undefined && config.dailyLimit > 0;
-    });
-
-    if (!dailyLimitPolicy) {
-      // No daily limit configured, allow the transaction
-      return;
-    }
-
-    const config = dailyLimitPolicy.configuration as PolicyConfiguration;
-    const dailyLimit = config.dailyLimit!;
-
-    // Check if the pending transaction would exceed the limit
-    if (spentInWindow + amount > dailyLimit) {
-      throw new VelocityLimitExceededException(
-        `Daily velocity limit exceeded. Spent: ${spentInWindow}, Pending: ${amount}, Limit: ${dailyLimit}`,
-        {
-          spentInWindow,
-          pendingAmount: amount,
-          limit: dailyLimit,
-          assetCode,
-        },
-      );
-    }
+  checkVelocityLimit(
+    _organizationId: string,
+    agentId: string,
+    amount: number,
+    assetCode: string,
+    _actorId?: string,
+  ): Promise<void> {
+    return this.spendingPolicyService.checkVelocityLimit(agentId, amount, assetCode);
   }
 }
 

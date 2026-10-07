@@ -1,5 +1,6 @@
 import type { Request } from 'express';
 import type { AuthenticatedUser } from '../common/interfaces/authenticated-user.interface';
+import type { ProblemDetails } from '../common/interfaces/api-response.interface';
 
 /**
  * Express request after authentication middleware has populated the principal.
@@ -19,6 +20,7 @@ export interface ApiSuccessEnvelope<T> {
   success: true;
   data: T;
   meta?: {
+    offset?: number;
     page?: number;
     limit?: number;
     total?: number;
@@ -28,9 +30,8 @@ export interface ApiSuccessEnvelope<T> {
   requestId: string;
 }
 
-/** The standard failure envelope; `code` is a machine-readable ErrorCode. */
-export interface ApiErrorEnvelope {
-  success: false;
-  error: { code: string; message: string; details?: Record<string, unknown> };
-  requestId: string;
-}
+/**
+ * The standard failure body: RFC 9457 problem details whose `code` extension
+ * is a machine-readable ErrorCode.
+ */
+export type ApiErrorEnvelope = ProblemDetails;

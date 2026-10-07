@@ -3,6 +3,9 @@ import { Job, UnrecoverableError } from 'bullmq';
 import { WebhooksProcessor } from './webhooks.processor';
 import { WebhookJobData } from './types/webhook-job.types';
 import { createHmac } from 'crypto';
+import {
+  WebhookCircuitBreakerService,
+} from './services/webhook-circuit-breaker.service';
 
 describe('WebhooksProcessor', () => {
   let processor: WebhooksProcessor;
@@ -233,6 +236,93 @@ describe('WebhooksProcessor', () => {
       // Attempt 5 of 5 (attemptsMade = 4, which means this is the last attempt)
       const job = createMockJob({ attemptsMade: 4 } as Partial<Job<WebhookJobData>>);
       await expect(processor.process(job)).rejects.toThrow('HTTP 503');
+    });
+  });
+
+  describe('per-domain circuit breaker (issue #219)', () => {
+    let breaker: WebhookCircuitBreakerService;
+
+    beforeEach(() => {
+      breaker = new WebhookCircuitBreakerService(2, 10_000);
+      processor = new WebhooksProcessor(
+        mockPrisma as never,
+        undefined,
+        undefined,
+        breaker,
+      );
+    });
+
+    it('records failures and trips the circuit after consecutive HTTP 500s', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve('Internal Server Error'),
+      });
+
+      await expect(processor.process(createMockJob())).rejects.toThrow('HTTP 500');
+      await expect(processor.process(createMockJob())).rejects.toThrow('HTTP 500');
+
+      const report = await breaker.getReport(WEBHOOK_URL);
+      expect(report.state).toBe('OPEN');
+      expect(report.consecutiveFailures).toBe(2);
+    });
+
+    it('fail-fasts without calling fetch while the circuit is OPEN', async () => {
+      await breaker.recordFailure(WEBHOOK_URL, new Error('HTTP 500'));
+      await breaker.recordFailure(WEBHOOK_URL, new Error('HTTP 500'));
+
+      await expect(processor.process(createMockJob())).rejects.toThrow('Circuit open');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('records successes and keeps the circuit CLOSED on healthy delivery', async () => {
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve('OK') });
+
+      await processor.process(createMockJob());
+
+      const report = await breaker.getReport(WEBHOOK_URL);
+      expect(report.state).toBe('CLOSED');
+      expect(report.consecutiveFailures).toBe(0);
+    });
+
+    it('allows delivery again after the circuit half-opens and delivery succeeds', async () => {
+      vi.useFakeTimers();
+      try {
+        fetchSpy.mockResolvedValue({
+          ok: false,
+          status: 500,
+          text: () => Promise.resolve('Internal Server Error'),
+        });
+        await expect(processor.process(createMockJob())).rejects.toThrow('HTTP 500');
+        await expect(processor.process(createMockJob())).rejects.toThrow('HTTP 500');
+        expect((await breaker.getReport(WEBHOOK_URL)).state).toBe('OPEN');
+
+        // Advance past the open window, then deliver successfully.
+        vi.advanceTimersByTime(10_001);
+        fetchSpy.mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve('OK') });
+        expect((await breaker.isDeliveryAllowed(WEBHOOK_URL)) as boolean).toBe(true);
+        await processor.process(createMockJob());
+
+        const report = await breaker.getReport(WEBHOOK_URL);
+        expect(['HALF_OPEN', 'CLOSED']).toContain(report.state);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('deliveries to a different domain are unaffected by an OPEN circuit', async () => {
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve('OK') });
+
+      await breaker.recordFailure(WEBHOOK_URL, new Error('HTTP 500'));
+      await breaker.recordFailure(WEBHOOK_URL, new Error('HTTP 500'));
+
+      const otherUrlJob = createMockJob({
+        data: createJobData({ url: 'https://other-domain.com/hook' }),
+      });
+      const result = await processor.process(otherUrlJob);
+      expect(result.success).toBe(true);
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(fetchSpy.mock.calls[0][0]).toBe('https://other-domain.com/hook');
     });
   });
 });

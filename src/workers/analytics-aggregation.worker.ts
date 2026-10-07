@@ -1,6 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Queues } from '../queues/queues.constants';
 import { WorkerMetricsService } from '../modules/metrics/worker-metrics.service';
+import { runWorkerJob, WorkerJob } from './job-worker';
 
 export interface AnalyticsRollupJob {
   organizationId: string;
@@ -25,17 +26,18 @@ export class AnalyticsAggregationWorker {
     @Optional() private readonly workerMetrics?: WorkerMetricsService,
   ) {}
 
-  async process(job: { data: AnalyticsRollupJob; name?: string }): Promise<void> {
-    const jobName = job.name ?? 'analytics-rollup';
-
+  async process(job: WorkerJob<AnalyticsRollupJob>): Promise<void> {
     const execute = async (): Promise<void> => {
       this.logger.log(`aggregate ${job.data.date} for org ${job.data.organizationId}`);
     };
 
-    if (this.workerMetrics) {
-      await this.workerMetrics.instrumentJob(this.queue, jobName, execute);
-    } else {
-      await execute();
-    }
+    await runWorkerJob({
+      queue: this.queue,
+      job,
+      logger: this.logger,
+      metrics: this.workerMetrics,
+      defaultJobName: 'analytics-rollup',
+      handler: execute,
+    });
   }
 }

@@ -1,5 +1,6 @@
 import { registerAs } from '@nestjs/config';
 import { databaseEnvSchema, validateEnv } from './env.validation';
+import { MigrationCheckMode, resolveMigrationCheckMode } from '../database/migration-checker';
 
 /**
  * Database connection configuration.
@@ -15,6 +16,10 @@ import { databaseEnvSchema, validateEnv } from './env.validation';
  * workers. It carries no server-side `statement_timeout` and a much longer
  * client-side guard so long-running worker transactions are never aborted by
  * the API-oriented timeouts.
+ *
+ * `migrationCheck` controls the boot-time migration status gate run by
+ * `main.ts` before the HTTP server listens (see `verifyMigrationsOnStartup`);
+ * `migrationsDir` overrides where the migrations folder is read from.
  */
 export type DatabaseConfig = {
   url: string;
@@ -24,6 +29,14 @@ export type DatabaseConfig = {
   queryTimeoutMs: number;
   statementTimeoutMs: number;
   workerQueryTimeoutMs: number;
+  migrationCheck: MigrationCheckMode;
+  migrationsDir?: string;
+  /** Wall-time threshold above which a query is logged as slow (0 = disabled). */
+  slowQueryThresholdMs: number;
+  connectionRetryAttempts: number;
+  connectionRetryDelayMs: number;
+  migrationCheckEnabled: boolean;
+  migrationCheckMode: 'halt' | 'warn';
 };
 
 export const databaseConfig = registerAs('database', (): DatabaseConfig => {
@@ -36,5 +49,12 @@ export const databaseConfig = registerAs('database', (): DatabaseConfig => {
     queryTimeoutMs: env.DATABASE_QUERY_TIMEOUT_MS,
     statementTimeoutMs: env.DATABASE_STATEMENT_TIMEOUT_MS,
     workerQueryTimeoutMs: env.DATABASE_WORKER_QUERY_TIMEOUT_MS,
+    migrationCheck: resolveMigrationCheckMode(env.DATABASE_MIGRATION_CHECK, process.env.NODE_ENV),
+    migrationsDir: env.DATABASE_MIGRATIONS_DIR,
+    slowQueryThresholdMs: env.DATABASE_SLOW_QUERY_THRESHOLD_MS,
+    connectionRetryAttempts: env.DATABASE_CONNECT_RETRY_ATTEMPTS,
+    connectionRetryDelayMs: env.DATABASE_CONNECT_RETRY_DELAY_MS,
+    migrationCheckEnabled: env.DATABASE_MIGRATION_CHECK_ENABLED,
+    migrationCheckMode: env.DATABASE_MIGRATION_CHECK_MODE,
   };
 });

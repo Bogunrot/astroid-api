@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { randomUUID } from 'crypto';
 import { LockNotAcquiredException } from '../exceptions/domain.exception';
@@ -42,12 +42,10 @@ export type LockRelease = () => Promise<void>;
  * ```
  */
 @Injectable()
-export class RedisLock implements OnModuleDestroy {
+export class RedisLock {
+  // The shared client is owned by LocksModule and closed in the shutdown
+  // coordinator's `redis` phase, after queues have drained.
   constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
-
-  onModuleDestroy(): void {
-    this.redis.disconnect();
-  }
 
   /**
    * Acquires a distributed lock with automatic expiration.

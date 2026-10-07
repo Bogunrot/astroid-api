@@ -1,9 +1,4 @@
-import {
-  CanActivate,
-  ExecutionContext,
-  Injectable,
-  Logger,
-} from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, Logger } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Redis } from 'ioredis';
@@ -46,8 +41,20 @@ export class SlidingWindowThrottlerGuard implements CanActivate {
       SLIDING_WINDOW_LIMIT_KEY,
       [context.getHandler(), context.getClass()],
     );
-    const limit = configured?.limit ?? this.defaultLimit;
+    let limit = configured?.limit ?? this.defaultLimit;
     const windowSeconds = configured?.windowSeconds ?? this.defaultWindowSeconds;
+
+    const userTier =
+      (request.user as (AuthenticatedUser & { tier?: string }) | undefined)?.tier ??
+      (request as Request & { apiKey?: { tier?: string } }).apiKey?.tier;
+    if (userTier === 'enterprise') {
+      limit = Math.max(limit, 500);
+    } else if (userTier === 'pro') {
+      limit = Math.max(limit, 250);
+    } else if (userTier === 'free' || userTier === 'standard') {
+      limit = Math.min(limit, 100);
+    }
+
     const key = this.keyFor(request, context);
     const now = Date.now();
     const windowStart = now - windowSeconds * 1000;
@@ -68,24 +75,36 @@ export class SlidingWindowThrottlerGuard implements CanActivate {
       const remaining = Math.max(0, limit - count - 1);
       response.setHeader('X-RateLimit-Remaining', remaining);
       if (count >= limit) {
-        response.setHeader('Retry-After', Math.max(1, Math.ceil((windowStart + windowSeconds * 1000 - now) / 1000)));
-        throw new DomainException(ErrorCode.RATE_LIMITED, 'Rate limit exceeded', { limit, windowSeconds });
+        response.setHeader(
+          'Retry-After',
+          Math.max(1, Math.ceil((windowStart + windowSeconds * 1000 - now) / 1000)),
+        );
+        throw new DomainException(ErrorCode.RATE_LIMITED, 'Rate limit exceeded', {
+          limit,
+          windowSeconds,
+        });
       }
       return true;
     } catch (error) {
       if (error instanceof DomainException && error.code === ErrorCode.RATE_LIMITED) throw error;
-      this.logger.error(`Sliding-window Redis check failed; allowing request: ${(error as Error).message}`);
+      this.logger.error(
+        `Sliding-window Redis check failed; allowing request: ${(error as Error).message}`,
+      );
       response.setHeader('X-RateLimit-Remaining', limit);
       return true;
     }
   }
 
-  private keyFor(request: Request & { user?: AuthenticatedUser }, context: ExecutionContext): string {
+  private keyFor(
+    request: Request & { user?: AuthenticatedUser },
+    context: ExecutionContext,
+  ): string {
     const scope = this.clientScope(request);
-    const tier = this.reflector.getAllAndOverride<ThrottleTier>(THROTTLE_TIER_KEY, [
-      context.getHandler(),
-      context.getClass(),
-    ]) ?? 'api';
+    const tier =
+      this.reflector.getAllAndOverride<ThrottleTier>(THROTTLE_TIER_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) ?? 'api';
     return `rate-limit:${tier}:${scope}:${context.getClass().name}:${context.getHandler().name}`;
   }
 
@@ -96,6 +115,10 @@ export class SlidingWindowThrottlerGuard implements CanActivate {
    * finally falls back to the client IP for fully unauthenticated routes.
    */
   private clientScope(request: Request & { user?: AuthenticatedUser }): string {
+    if (request.user?.isApiKey) {
+      return `key:${request.user.apiKeyId ?? request.user.id}`;
+    }
+
     const organizationId = request.user?.organizationId;
     if (organizationId) {
       return `org:${organizationId}`;

@@ -1,28 +1,35 @@
 import { z } from 'zod';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { OrganizationPlan, UserRole, UserStatus } from '@prisma/client';
+import { sanitizeTextField } from '../../common/validators/text-field.sanitizer';
 
-export const updateOrganizationSchema = z.object({
-  name: z.string().min(2).max(120).optional(),
-  description: z.string().max(500).optional(),
-  logo: z.string().url().optional(),
-  plan: z.nativeEnum(OrganizationPlan).optional(),
-});
+export const updateOrganizationSchema = z
+  .object({
+    name: z.string().min(2).max(120).transform(sanitizeTextField).optional(),
+    description: z.string().max(500).transform(sanitizeTextField).optional(),
+    logo: z.string().url().optional(),
+    plan: z.nativeEnum(OrganizationPlan).optional(),
+  })
+  .strict();
 
 export type UpdateOrganizationInput = z.infer<typeof updateOrganizationSchema>;
 
-export const inviteMemberSchema = z.object({
-  name: z.string().min(1),
-  email: z.string().email(),
-  role: z.nativeEnum(UserRole),
-});
+export const inviteMemberSchema = z
+  .object({
+    name: z.string().min(1).transform(sanitizeTextField),
+    email: z.string().email(),
+    role: z.nativeEnum(UserRole),
+  })
+  .strict();
 
 export type InviteMemberInput = z.infer<typeof inviteMemberSchema>;
 
-export const updateMemberSchema = z.object({
-  role: z.nativeEnum(UserRole).optional(),
-  status: z.nativeEnum(UserStatus).optional(),
-});
+export const updateMemberSchema = z
+  .object({
+    role: z.nativeEnum(UserRole).optional(),
+    status: z.nativeEnum(UserStatus).optional(),
+  })
+  .strict();
 
 export type UpdateMemberInput = z.infer<typeof updateMemberSchema>;
 

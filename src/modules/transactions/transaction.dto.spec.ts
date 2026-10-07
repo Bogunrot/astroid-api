@@ -8,6 +8,60 @@ describe('createTransactionSchema memo validation', () => {
     recipientAddress: 'GDEGSXLGANKHK7QFOV63XCBHBTZ3YRKUJV7ZB7JMSJQB5CNBRLL5QIG5',
   };
 
+  describe('payment input validation', () => {
+    it('accepts a complete payment payload with metadata', () => {
+      expect(
+        createTransactionSchema.parse({
+          ...baseInput,
+          metadata: { invoiceId: 'invoice-1' },
+        }),
+      ).toMatchObject({
+        amount: '10.0000000',
+        recipientAddress: baseInput.recipientAddress,
+        metadata: { invoiceId: 'invoice-1' },
+      });
+    });
+
+    it('rejects missing wallet identifiers and negative or zero amounts', () => {
+      expect(() =>
+        createTransactionSchema.parse({
+          amount: '10',
+          recipientAddress: baseInput.recipientAddress,
+        }),
+      ).toThrow();
+      expect(() =>
+        createTransactionSchema.parse({ ...baseInput, amount: '-1' }),
+      ).toThrow();
+      expect(() =>
+        createTransactionSchema.parse({ ...baseInput, amount: '0' }),
+      ).toThrow();
+    });
+
+    it('rejects malformed recipients and non-object metadata', () => {
+      expect(() =>
+        createTransactionSchema.parse({ ...baseInput, recipientAddress: 'not-a-stellar-address' }),
+      ).toThrow();
+      expect(() =>
+        createTransactionSchema.parse({ ...baseInput, metadata: ['unexpected'] }),
+      ).toThrow();
+    });
+
+    it('rejects non-JSON values nested in metadata', () => {
+      expect(() =>
+        createTransactionSchema.parse({
+          ...baseInput,
+          metadata: { nested: { unsupported: undefined } },
+        }),
+      ).toThrow();
+      expect(() =>
+        createTransactionSchema.parse({
+          ...baseInput,
+          metadata: { nested: [Number.NaN] },
+        }),
+      ).toThrow();
+    });
+  });
+
   describe('legacy string memo (TEXT type)', () => {
     it('accepts valid legacy memo', () => {
       const result = createTransactionSchema.parse({ ...baseInput, memo: 'hello' });

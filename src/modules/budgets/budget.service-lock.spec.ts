@@ -5,8 +5,19 @@ import { BudgetRepository } from './budget.repository';
 import { RedisLock } from '../../common/locks/redis-lock.util';
 import { EventBusService } from '../../events/event-bus.service';
 import { BudgetExceededException } from '../../common/exceptions/domain.exception';
+import { PrismaTransactionService } from '../../database/prisma-transaction.service';
 
 const Decimal = Prisma.Decimal;
+
+/**
+ * Passes the callback straight through with a stand-in transactional client so
+ * the specs keep exercising real `BudgetService` logic without a live database.
+ */
+function fakeTransactions(): PrismaTransactionService {
+  return {
+    run: (fn: (tx: never) => Promise<unknown>) => fn({} as never),
+  } as unknown as PrismaTransactionService;
+}
 
 /** Minimal mock Budget row builder. */
 function mockBudget(
@@ -69,7 +80,7 @@ describe('BudgetService — distributed locking', () => {
       emit: vi.fn().mockResolvedValue(undefined),
     } as unknown as EventBusService;
 
-    service = new BudgetService(repository, eventBus, redisLock);
+    service = new BudgetService(repository, eventBus, redisLock, fakeTransactions());
   });
 
   // ── allocate ──
@@ -305,7 +316,12 @@ describe('BudgetService - reserveBudget concurrency', () => {
   let service: BudgetService;
   beforeEach(() => {
     repository = new BudgetRepository({} as unknown as ConstructorParameters<typeof BudgetRepository>[0]);
-    service = new BudgetService(repository, {} as unknown as EventBusService, {} as unknown as RedisLock);
+    service = new BudgetService(
+      repository,
+      {} as unknown as EventBusService,
+      {} as unknown as RedisLock,
+      fakeTransactions(),
+    );
   });
 
     it('should securely process parallel reserves without exceeding limit', async () => {

@@ -250,6 +250,7 @@ describe('AgentService', () => {
       });
 
       const result = await service.list(orgId, {
+        offset: 0,
         page: 1,
         limit: 10,
         sort: 'createdAt',

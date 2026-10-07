@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 
 /**
  * Zod schema for the time-range filter used in failed job queries.
@@ -68,3 +69,44 @@ export const inspectJobParamsSchema = z.object({
 });
 
 export type InspectJobParamsDto = z.infer<typeof inspectJobParamsSchema>;
+
+// ── Swagger DTOs ──
+
+/** Swagger model mirroring {@link ListFailedJobsFilterDto}. */
+export class ListFailedJobsFilterDtoSwagger {
+  @ApiPropertyOptional({ description: 'Restrict results to a single queue; omit to query all queues', example: 'webhooks' })
+  queue?: string;
+
+  @ApiPropertyOptional({ description: 'Failed-reason substring filter (case-insensitive)', example: 'HTTP 503' })
+  reasonContains?: string;
+
+  @ApiPropertyOptional({ description: 'Exact BullMQ job name filter', example: 'webhook-delivery' })
+  jobName?: string;
+
+  @ApiPropertyOptional({ type: Object, description: 'Time range filter in epoch ms: { from?, to? }' })
+  timeRange?: { from?: number; to?: number };
+
+  @ApiPropertyOptional({ description: 'Page number (1-indexed)', default: 1, example: 1 })
+  page?: number;
+
+  @ApiPropertyOptional({ description: 'Items per page (max 100)', default: 20, example: 20 })
+  limit?: number;
+}
+
+/** Swagger model mirroring {@link BatchRetryFilterDto} / {@link BatchPurgeFilterDto}. */
+export class BatchOperationFilterDtoSwagger {
+  @ApiPropertyOptional({ description: 'Restrict the operation to a single queue; omit to target all queues', example: 'webhooks' })
+  queue?: string;
+
+  @ApiPropertyOptional({ description: 'Failed-reason substring filter (case-insensitive)', example: 'timeout' })
+  reasonContains?: string;
+
+  @ApiPropertyOptional({ description: 'Exact BullMQ job name filter', example: 'deliver-webhook' })
+  jobName?: string;
+
+  @ApiPropertyOptional({ type: Object, description: 'Time range filter in epoch ms: { from?, to? }' })
+  timeRange?: { from?: number; to?: number };
+
+  @ApiPropertyOptional({ description: 'Maximum number of jobs to process in this invocation', default: 1000, example: 1000 })
+  limit?: number;
+}

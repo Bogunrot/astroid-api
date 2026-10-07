@@ -40,6 +40,7 @@ const EXCLUDED_META_KEYS = new Set(['password', 'token', 'authorization', 'x-api
  *
  * Routes decorated with @SkipAudit() are excluded.
  */
+
 @Injectable()
 export class AuditInterceptor implements NestInterceptor {
   private readonly logger = new Logger(AuditInterceptor.name);
@@ -82,54 +83,35 @@ export class AuditInterceptor implements NestInterceptor {
 
     const startTime = Date.now();
 
+    const recordLog = () => {
+          const durationMs = Date.now() - startTime;
+      const action = customAction ?? `${method} ${originalUrl}`;
+          this.persistAuditLog({
+            organizationId,
+            userId,
+            agentId,
+        action,
+            method,
+            url: originalUrl,
+            statusCode: res.statusCode,
+            ipAddress,
+            userAgent,
+            requestId,
+            body: sanitizedBody,
+            params: sanitizedParams,
+            query: sanitizedQuery,
+            durationMs,
+          }).catch((err) => {
+            this.logger.error(
+              `Failed to persist audit log for ${method} ${originalUrl}: ${(err as Error).message}`,
+            );
+          });
+    };
+
     return next.handle().pipe(
       tap({
-        next: () => {
-          const durationMs = Date.now() - startTime;
-          this.persistAuditLog({
-            organizationId,
-            userId,
-            agentId,
-            action: customAction,
-            method,
-            url: originalUrl,
-            statusCode: res.statusCode,
-            ipAddress,
-            userAgent,
-            requestId,
-            body: sanitizedBody,
-            params: sanitizedParams,
-            query: sanitizedQuery,
-            durationMs,
-          }).catch((err) => {
-            this.logger.error(
-              `Failed to persist audit log for ${method} ${originalUrl}: ${(err as Error).message}`,
-            );
-          });
-        },
-        error: () => {
-          const durationMs = Date.now() - startTime;
-          this.persistAuditLog({
-            organizationId,
-            userId,
-            agentId,
-            action: customAction,
-            method,
-            url: originalUrl,
-            statusCode: res.statusCode,
-            ipAddress,
-            userAgent,
-            requestId,
-            body: sanitizedBody,
-            params: sanitizedParams,
-            query: sanitizedQuery,
-            durationMs,
-          }).catch((err) => {
-            this.logger.error(
-              `Failed to persist audit log for ${method} ${originalUrl}: ${(err as Error).message}`,
-            );
-          });
-        },
+        next: () => recordLog(),
+        error: () => recordLog(),
       }),
     );
   }
@@ -169,7 +151,7 @@ export class AuditInterceptor implements NestInterceptor {
     organizationId: string | null;
     userId: string | null;
     agentId: string | null;
-    action: string | undefined;
+    action: string;
     method: string;
     url: string;
     statusCode: number;
@@ -188,7 +170,7 @@ export class AuditInterceptor implements NestInterceptor {
     await this.auditService.record({
       organizationId: data.organizationId,
       userId: data.userId,
-      action: data.action ?? `${data.method} ${data.url}`,
+      action: data.action,
       entity: 'http',
       entityId: null,
       newValue: {

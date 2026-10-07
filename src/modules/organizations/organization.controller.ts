@@ -6,7 +6,6 @@ import {
   ApiResponse,
   ApiParam,
   ApiBody,
-  ApiQuery,
 } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { OrganizationService } from './organization.service';
@@ -27,6 +26,7 @@ import { AuditAction } from '../../common/decorators/audit-action.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { AuthenticatedUser } from '../../common/interfaces/authenticated-user.interface';
 import { PaginationQuery, paginationQuerySchema } from '../../common/helpers/pagination';
+import { ApiPaginationQuery } from '../../common/decorators/api-pagination-query.decorator';
 
 @ApiTags('organizations')
 @ApiBearerAuth('access-token')
@@ -70,8 +70,7 @@ export class OrganizationController {
     summary: 'List organization members',
     description: 'Returns a paginated list of members in the current organization.',
   })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (default: 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default: 20)' })
+  @ApiPaginationQuery()
   @ApiResponse({ status: 200, description: 'Paginated list of members' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   listMembers(

@@ -20,6 +20,7 @@ import {
   StellarTransactionInfo,
   SubmitPaymentParams,
 } from './stellar.interface';
+import { retryWithBackoff } from '../../utils/retry.util';
 
 /**
  * Real Stellar client backed by Horizon. Activated when STELLAR_USE_MOCK=false.
@@ -50,7 +51,10 @@ export class HorizonStellarClient implements StellarClient {
   }
 
   async getBalances(address: string, _network: StellarNetworkName): Promise<StellarBalance[]> {
-    const account = await this.server.loadAccount(address);
+    const account = await retryWithBackoff(
+      () => this.server.loadAccount(address),
+      { maxAttempts: 3, baseDelayMs: 500, operationName: 'Horizon loadAccount' },
+    );
     return account.balances.map((balance) => ({
       asset: balance.asset_type === 'native' ? 'XLM' : this.assetCode(balance),
       balance: balance.balance,
@@ -64,7 +68,10 @@ export class HorizonStellarClient implements StellarClient {
   }
 
   async buildPaymentXdr(params: BuildPaymentParams): Promise<string> {
-    const source = await this.server.loadAccount(params.sourceAddress);
+    const source = await retryWithBackoff(
+      () => this.server.loadAccount(params.sourceAddress),
+      { maxAttempts: 3, baseDelayMs: 500, operationName: 'Horizon loadAccount' },
+    );
     const tx = this.buildTransaction(source, params);
     return tx.toXDR();
   }
@@ -74,7 +81,10 @@ export class HorizonStellarClient implements StellarClient {
       throw new Error('HorizonStellarClient.submitPayment requires a source secret');
     }
     const keypair = Keypair.fromSecret(params.sourceSecret);
-    const source = await this.server.loadAccount(params.sourceAddress);
+    const source = await retryWithBackoff(
+      () => this.server.loadAccount(params.sourceAddress),
+      { maxAttempts: 3, baseDelayMs: 500, operationName: 'Horizon loadAccount' },
+    );
     const tx = this.buildTransaction(source, params);
     tx.sign(keypair);
     try {
@@ -95,7 +105,10 @@ export class HorizonStellarClient implements StellarClient {
     _network: StellarNetworkName,
   ): Promise<StellarTransactionInfo | null> {
     try {
-      const tx = await this.server.transactions().transaction(hash).call();
+      const tx = await retryWithBackoff(
+        () => this.server.transactions().transaction(hash).call(),
+        { maxAttempts: 3, baseDelayMs: 500, operationName: 'Horizon getTransaction' },
+      );
       return {
         hash: tx.hash,
         successful: tx.successful,
